@@ -1,0 +1,31 @@
+{
+  "name": "cocina-landing",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start",
+    "lint": "eslint"
+  },
+  "dependencies": {
+    "dotenv": "^17.3.1",
+    "jose": "^6.1.3",
+    "jsonwebtoken": "^9.0.3",
+    "mercadopago": "^2.12.0",
+    "mongoose": "^9.1.5",
+    "next": "16.1.4",
+    "react": "19.2.3",
+    "react-dom": "19.2.3",
+    "resend": "^6.8.0",
+    "sass": "^1.97.3",
+    "zod": "^4.3.6"
+  },
+  "devDependencies": {
+    "eslint": "^9",
+    "eslint-config-next": "16.1.4"
+  },
+  "engines": {
+    "node": "20.x"
+  }
+}

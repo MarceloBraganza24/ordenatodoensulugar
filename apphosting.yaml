@@ -1,0 +1,58 @@
+# Settings for Backend (on Cloud Run).
+# See https://firebase.google.com/docs/app-hosting/configure#cloud-run
+runConfig:
+  minInstances: 0
+  maxInstances: 50
+  concurrency: 80
+  # maxInstances: 100
+  # concurrency: 80
+  # cpu: 1
+  # memoryMiB: 512
+
+  # Environment variables and secrets.
+  # env:
+  # Configure environment variables.
+  # See https://firebase.google.com/docs/app-hosting/configure#user-defined-environment
+  # - variable: MESSAGE
+  #   value: Hello world!
+  #   availability:
+  #     - BUILD
+  #     - RUNTIME
+
+  # Grant access to secrets in Cloud Secret Manager.
+  # See https://firebase.google.com/docs/app-hosting/configure#secret-parameters
+  # - variable: MY_SECRET
+  #   secret: mySecretRef
+env:
+  - variable: NODE_ENV
+    value: production
+  - variable: MONGODB_URI
+    secret: mongodbUriSrv
+  - variable: MP_ACCESS_TOKEN
+    secret: mpAccessToken
+  - variable: JWT_SECRET
+    secret: jwtSecret
+  - variable: ADMIN_USERNAME
+    secret: adminUsername
+  - variable: ADMIN_PASSWORD
+    secret: adminPassword
+  - variable: RESEND_API_KEY
+    secret: resendApiKey
+  - variable: CRON_SECRET
+    value: "9f3c7a2d8b4e6f1a0c5d9e7b2a1f4c8d6e3b0a9f1d7c2e4b6a8c0d3e5f7b9a2"
+  - variable: NEXT_PUBLIC_SITE_URL
+    value: https://ordenatodoensulugar.com.ar
+  - variable: NEXT_PUBLIC_CA_POSTAL_ORIGIN
+    value: "7540"
+  - variable: NEXT_PUBLIC_WA_PHONE
+    value: 5492926459172
+  - variable: EMAIL_FROM
+    value: ORDENA <noreply@ordenatodoensulugar.com.ar>
+  - variable: ARREPENTIMIENTO_TO_EMAIL
+    value: ordenatodoensulugar@gmail.com
+  - variable: NEXT_PUBLIC_META_PIXEL_ID
+    value: 853563471024652
+  - variable: META_ACCESS_TOKEN
+    secret: metaAccessToken
+  - variable: META_DATASET_ID
+    secret: metaDataSetId

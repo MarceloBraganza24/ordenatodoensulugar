@@ -1,0 +1,150 @@
+.page {
+  min-height: calc(100vh - 80px);
+  max-width: 760px;
+  margin: 0 auto;
+  padding: 48px 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 24px;
+  color: #111;
+}
+
+.title {
+  font-size: 1.8rem;
+  font-weight: 600;
+  letter-spacing: -0.02em;
+}
+
+.subtitle {
+  color: #555;
+  line-height: 1.5;
+}
+
+/* ---------- mensajes de estado ---------- */
+.stateOk {
+  color: #1f7a4f;
+}
+
+.statePending {
+  color: #a36a00;
+}
+
+.stateFail {
+  color: #b42318;
+}
+
+/* ---------- links ---------- */
+.link {
+  color: #111;
+  font-weight: 500;
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+.link:hover {
+  opacity: 0.75;
+}
+
+/* ---------- botones ---------- */
+.primaryBtn {
+  border: none;
+  background: #111;
+  color: #fff;
+  padding: 10px 16px;
+  border-radius: 10px;
+  font-size: 0.9rem;
+  cursor: pointer;
+  transition: transform 0.05s ease, opacity 0.15s ease;
+}
+.primaryBtn:hover {
+  opacity: 0.9;
+}
+.primaryBtn:active {
+  transform: scale(0.98);
+}
+
+.ghostBtn {
+  border: 1px solid #ddd;
+  background: transparent;
+  color: #111;
+  padding: 9px 14px;
+  border-radius: 10px;
+  font-size: 0.85rem;
+  cursor: pointer;
+}
+.ghostBtn:hover {
+  background: #f6f6f6;
+}
+
+/* ---------- cards ---------- */
+.card {
+  border: 1px solid #eee;
+  border-radius: 16px;
+  padding: 20px 22px;
+  background: #fff;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+/* ---------- listas ---------- */
+.list {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.listItem {
+  border: 1px solid #eee;
+  border-radius: 14px;
+  padding: 14px 16px;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+}
+
+.itemActions {
+  display: flex;
+  gap: 10px;
+}
+
+/* ---------- pedido ---------- */
+.orderMeta {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px 16px;
+  font-size: 0.9rem;
+  color: #333;
+}
+
+.orderMeta span {
+  color: #777;
+}
+
+.products {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  font-size: 0.95rem;
+}
+
+.total {
+  font-size: 1.1rem;
+  font-weight: 600;
+}
+
+/* ---------- util ---------- */
+.muted {
+  font-size: 0.8rem;
+  color: #777;
+}
+
+.footer {
+  margin-top: 24px;
+}/*# sourceMappingURL=OrdersPages.module.css.map */
