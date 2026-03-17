@@ -6,7 +6,8 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "lint": "eslint"
+    "lint": "eslint",
+    "seed:products": "node scripts/seed-products.js"
   },
   "dependencies": {
     "dotenv": "^17.3.1",
