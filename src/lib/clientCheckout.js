@@ -18,7 +18,7 @@ function saveMyOrder(order) {
 function getUtmHeaders() {
   return {
     "x-path": typeof window !== "undefined" ? window.location.pathname : "",
-    "x-ref": typeof document !== "undefined" ? (document.referrer || "") : "",
+    "x-ref": typeof document !== "undefined" ? document.referrer || "" : "",
     "x-utm-source": sessionStorage.getItem("utm_source") || "",
     "x-utm-medium": sessionStorage.getItem("utm_medium") || "",
     "x-utm-campaign": sessionStorage.getItem("utm_campaign") || "",
@@ -27,19 +27,70 @@ function getUtmHeaders() {
   };
 }
 
-export async function startCheckout(items, buyer, extra = {}) {
-  const eventId = newEventId("checkout");
-  const fbp = getFbp();
-  const fbc = getFbc();
+function toErrorMessage(value) {
+  if (!value) return "";
 
-  const total =
-    Array.isArray(items)
-      ? items.reduce(
-          (acc, it) =>
-            acc + Number(it?.unitPrice || 0) * Number(it?.qty || 0),
-          0
+  if (typeof value === "string") return value;
+
+  if (value instanceof Error) return value.message || "Error inesperado.";
+
+  if (typeof value === "object") {
+    if (typeof value.message === "string" && value.message.trim()) {
+      return value.message;
+    }
+
+    if (typeof value.error === "string" && value.error.trim()) {
+      return value.error;
+    }
+
+    if (Array.isArray(value.errors) && value.errors.length > 0) {
+      const first = value.errors[0];
+
+      if (typeof first === "string") return first;
+      if (first && typeof first.message === "string") return first.message;
+    }
+
+    if (value.fieldErrors) {
+      const flatErrors = Object.entries(value.fieldErrors)
+        .flatMap(([field, messages]) =>
+          Array.isArray(messages)
+            ? messages.map((msg) => `${field}: ${msg}`)
+            : []
         )
-      : 0;
+        .filter(Boolean);
+
+      if (flatErrors.length) return flatErrors.join(" | ");
+    }
+
+    try {
+      return JSON.stringify(value, null, 2);
+    } catch {
+      return "Error inesperado.";
+    }
+  }
+
+  return String(value);
+}
+
+export async function startCheckout(items, buyer, extra = {}) {
+  const eventId = newEventId("checkout") || "";
+  const fbp = getFbp() || "";
+  const fbc = getFbc() || "";
+
+  const total = Number(extra?.orderValue || 0);
+
+  const payload = {
+    items,
+    buyer,
+    zip: extra?.zip || "",
+    shipping: extra?.shipping || null,
+    meta: {
+      eventId: String(eventId || ""),
+      fbp: String(fbp || ""),
+      fbc: String(fbc || ""),
+    },
+  };
+
 
   const res = await fetch("/api/checkout", {
     method: "POST",
@@ -47,19 +98,27 @@ export async function startCheckout(items, buyer, extra = {}) {
       "Content-Type": "application/json",
       ...getUtmHeaders(),
     },
-    body: JSON.stringify({
-      items,
-      buyer,
-      zip: extra?.zip || "",
-      shipping: extra?.shipping || null,
-      meta: { eventId, fbp, fbc },
-    }),
+    body: JSON.stringify(payload),
   });
 
   const data = await res.json().catch(() => ({}));
-  if (!res.ok) throw new Error(data?.error || "Checkout error");
 
-  // ✅ Track solo si la orden se creó correctamente
+  if (!res.ok || !data?.ok) {
+    const msg =
+      toErrorMessage(data?.error) ||
+      toErrorMessage(data?.message) ||
+      toErrorMessage(data) ||
+      "No se pudo iniciar el checkout.";
+
+    throw new Error(msg);
+  }
+
+  const initPoint = data?.initPoint || data?.init_point || "";
+
+  if (!initPoint) {
+    throw new Error("La respuesta no incluyó initPoint.");
+  }
+
   try {
     track("InitiateCheckout", { value: total, currency: "ARS" }, eventId);
   } catch {}
@@ -82,5 +141,5 @@ export async function startCheckout(items, buyer, extra = {}) {
     });
   }
 
-  window.location.href = data.init_point;
+  window.location.href = initPoint;
 }

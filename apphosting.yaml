@@ -52,6 +52,10 @@ env:
     value: ordenatodoensulugar@gmail.com
   - variable: NEXT_PUBLIC_META_PIXEL_ID
     value: 853563471024652
+  - variable: NEXT_PUBLIC_GOOGLE_MAPS_API_KEY
+    value: AIzaSyAbW70VpzZqiB1CV8B0QAYGzO3w46kXm7Y
+  - variable: APP_ENV
+    value: production
   - variable: META_ACCESS_TOKEN
     secret: metaAccessToken
   - variable: META_DATASET_ID
