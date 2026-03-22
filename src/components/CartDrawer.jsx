@@ -808,13 +808,40 @@ export function CartDrawer() {
       return;
     }
 
+    const shippingPayload = shouldApplyFreeShipping
+      ? {
+          carrier: "Gratis",
+          service: qualifiesByLocalZip
+            ? "Retiro / entrega local"
+            : "Envío incluido",
+          price: 0,
+          eta: "",
+          mode: "free",
+        }
+      : shipQuote
+      ? {
+          carrier: shipQuote.carrier || "Envío estándar",
+          service: shipQuote.service || "A domicilio",
+          price: Number(shipQuote.price || 0),
+          eta: shipQuote.eta || "",
+          mode: shipQuote.mode || "paid",
+        }
+      : null;
+
+    if (!shippingPayload) {
+      setErr("No pudimos calcular el envío. Probá de nuevo.");
+      scrollToField("ship_address_search");
+      return;
+    }
+
     setBusy(true);
+
     try {
       await startCheckout(
         cart.items.map((it) => ({ slug: it.slug, qty: it.qty })),
         buyer,
         {
-          shipping: shipQuote,
+          shipping: shippingPayload,
           zip: normalizeZip(postalCode),
           orderValue: grandTotal,
         }

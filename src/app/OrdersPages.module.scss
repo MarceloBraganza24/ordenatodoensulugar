@@ -213,3 +213,18 @@
   padding: 8px 10px;
   border-radius: 12px;
 }
+
+.orderDetailTotalRow {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 0.5vh;
+  width: 100%;
+}
+
+.orderDetailTotals {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5vh;
+  width: 100%;
+}

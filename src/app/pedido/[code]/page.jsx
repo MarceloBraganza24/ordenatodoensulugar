@@ -4,6 +4,7 @@ import { useEffect, useState } from "react";
 import { useRouter, useParams } from "next/navigation";
 import Link from "next/link";
 import { getProvinceName } from "@/lib/provinces";
+import styles from "../../OrdersPages.module.scss";
 import { formatARS } from "@/lib/money";
 
 function fmtDate(d) {
@@ -223,19 +224,25 @@ export default function PedidoDetallePage() {
           ))}
         </ul>
 
-        <div className="orderDetailTotals">
+        <div className={styles.orderDetailTotals}>
 
-          <div className="orderDetailTotalRow">
+          <div className={styles.actionsRow}>
             <span>Productos:</span>
             <b> {formatARS(itemsSubtotal)} {order.currency}</b>
           </div>
 
-          <div className="orderDetailTotalRow">
-            <span>Envío {shipService ? `(${shipService})` : ""}:</span>
+          <div className={styles.actionsRow}>
+            <span>
+              Envío{" "}
+              {shipService
+                ? `(${shipService.replace(/\s*\(tarifa fija\)/i, "")})`
+                : ""}
+              :
+            </span>
             <b> {formatARS(shippingPrice)} {order.currency}</b>
           </div>
 
-          <div className="orderDetailTotalRow orderDetailTotalRow--final">
+          <div className={styles.actionsRow}>
             <span>Total:</span>
             <b> {formatARS(grandTotal)} {order.currency}</b>
           </div>
