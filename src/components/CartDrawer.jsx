@@ -19,6 +19,8 @@ function isFreeShippingZip(destZip, provinceCode) {
   return provinceCode === "B" && ORIGIN_ZIP && dz && dz === ORIGIN_ZIP;
 }
 
+
+
 const PROVINCES_AR = [
   { name: "Buenos Aires", code: "B" },
   { name: "CABA", code: "C" },
@@ -191,11 +193,28 @@ export function CartDrawer() {
 
   const missingStreetNumber = hasSelectedAddress && !streetNumber.trim();
 
-  const scrollToTop = () => {
+  /* const scrollToTop = () => {
     requestAnimationFrame(() => {
       panelScrollRef.current?.scrollTo({ top: 0, behavior: "smooth" });
     });
   };
+
+  const scrollCartToTop = () => {
+    const el = panelScrollRef.current;
+    if (!el) return;
+
+    requestAnimationFrame(() => {
+      el.scrollTop = 0;
+    });
+  }; */
+  useEffect(() => {
+    const el = panelScrollRef.current;
+    if (!el) return;
+
+    requestAnimationFrame(() => {
+      el.scrollTop = 0;
+    });
+  }, [step]);
 
   const scrollToField = (id) => {
     if (!id) return;
@@ -426,35 +445,54 @@ export function CartDrawer() {
     }
   };
 
-  const handleAddressSelected = (address) => {
-    setFormattedAddress(address.formattedAddress || "");
-    setAddressQuery(address.formattedAddress || "");
-    setGooglePlaceId(address.googlePlaceId || "");
-    setStreetName(address.streetName || "");
-    setStreetNumber(onlyDigits(address.streetNumber || ""));
-    setCity(address.city || "");
-    setProvince(address.provinceCode || "");
-    setPostalCode(onlyDigits(address.postalCode || ""));
+  // const quoteTimeoutRef = useRef(null);
 
-    setShipQuote(null);
-    setShipStatus("idle");
-    setShipError("");
+  const handleAddressSelected = async (addr) => {
+    const nextAddressQuery = addr?.label || addr?.formattedAddress || "";
+    const nextFormattedAddress = addr?.formattedAddress || addr?.label || "";
+    const nextGooglePlaceId = addr?.googlePlaceId || addr?.placeId || "";
+    const nextStreetName = addr?.streetName || "";
+    const nextStreetNumber = addr?.streetNumber || "";
+    const nextCity = addr?.city || "";
+    const nextProvince = addr?.provinceCode || "";
+    const nextPostalCode = addr?.postalCode || "";
+
+    setAddressQuery(nextAddressQuery);
+    setStreetName(nextStreetName);
+    setStreetNumber(nextStreetNumber);
+    setCity(nextCity);
+    setProvince(nextProvince);
+    setPostalCode(nextPostalCode);
+    setFormattedAddress(nextFormattedAddress);
+    setGooglePlaceId(nextGooglePlaceId);
+
+    await quoteShipping({
+      addressQuery: nextAddressQuery,
+      province: nextProvince,
+      city: nextCity,
+      postalCode: nextPostalCode,
+    });
   };
 
-  async function quoteShipping() {
+  async function quoteShipping(overrides = {}) {
     setErr("");
     setShipError("");
     setShipStatus("idle");
     setShipQuote(null);
 
-    if (!addressQuery.trim()) {
+    const currentAddressQuery = (overrides.addressQuery ?? addressQuery ?? "").trim();
+    const currentProvince = overrides.province ?? province;
+    const currentCity = (overrides.city ?? city ?? "").trim();
+    const currentPostalCode = normalizeZip(overrides.postalCode ?? postalCode);
+
+    if (!currentAddressQuery) {
       setShipStatus("error");
       setShipError("Ingresá tu dirección.");
       scrollToField("ship_address_search");
       return;
     }
 
-    if (!province) {
+    if (!currentProvince) {
       setShipStatus("error");
       setShipError(
         "Necesitamos una provincia válida. Elegí una dirección sugerida."
@@ -463,7 +501,7 @@ export function CartDrawer() {
       return;
     }
 
-    if (!city.trim()) {
+    if (!currentCity) {
       setShipStatus("error");
       setShipError(
         "Necesitamos una ciudad/localidad válida. Elegí una dirección sugerida."
@@ -472,9 +510,7 @@ export function CartDrawer() {
       return;
     }
 
-    const currentZip = normalizeZip(postalCode);
-
-    if (!isValidZip(currentZip)) {
+    if (!isValidZip(currentPostalCode)) {
       setShipStatus("error");
       setShipError(
         "Necesitamos un código postal válido. Elegí una dirección sugerida."
@@ -494,7 +530,10 @@ export function CartDrawer() {
     );
 
     const qualifiesByAmountNow = cart.total >= FREE_SHIPPING_THRESHOLD;
-    const qualifiesByLocalZipNow = isFreeShippingZip(currentZip, province);
+    const qualifiesByLocalZipNow = isFreeShippingZip(
+      currentPostalCode,
+      currentProvince
+    );
 
     if (
       hasFreeShippingProductInCart ||
@@ -513,7 +552,7 @@ export function CartDrawer() {
 
       setShipQuote({
         carrier: "Gratis",
-        service,
+        service: "(incluido en tu compra)",
         price: 0,
         eta: "",
         mode: "free",
@@ -529,12 +568,12 @@ export function CartDrawer() {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          postalCode: currentZip,
+          postalCode: currentPostalCode,
           deliveredType: "D",
           items: cart.items.map((it) => ({ slug: it.slug, qty: it.qty })),
           destination: {
-            province,
-            city: city?.trim() || null,
+            province: currentProvince,
+            city: currentCity || null,
           },
         }),
       });
@@ -553,7 +592,7 @@ export function CartDrawer() {
         msg.toLowerCase().includes("faltan credenciales") ||
         msg.toLowerCase().includes("no disponible")
       ) {
-        const q = getFlatShippingQuote({ provinceCode: province });
+        const q = getFlatShippingQuote({ provinceCode: currentProvince });
         setShipQuote(q);
         setShipStatus("ok");
         return;
@@ -587,10 +626,10 @@ export function CartDrawer() {
       };
     }
 
-    if (!shipQuote) {
+    if (!shouldApplyFreeShipping && !shipQuote) {
       return {
-        msg: "Primero cotizá el envío antes de continuar.",
-        fieldId: "ship_quote_btn",
+        msg: "Primero esperá que se calcule el envío antes de continuar.",
+        fieldId: "ship_address_search",
       };
     }
 
@@ -852,7 +891,7 @@ export function CartDrawer() {
                 ))}
               </div>
 
-              {step > 1 ? (
+              {/* {step > 1 ? (
                 <div className="cartMiniSummary">
                   <div className="cartMiniSummary__row">
                     <span>Productos</span>
@@ -875,7 +914,7 @@ export function CartDrawer() {
                     <strong>{formatARS(grandTotal)}</strong>
                   </div>
                 </div>
-              ) : null}
+              ) : null} */}
 
               {step === 1 ? (
                 <>
@@ -1031,65 +1070,63 @@ export function CartDrawer() {
                       <div className="shipQuote__row">
                         <div className="shipQuote__field">
                           <label>Destino</label>
+
                           <div className="shipQuote__readonly">
                             {provinceName || "—"} · {city || "—"} ·{" "}
                             {postalCode ? normalizeZip(postalCode) : "—"}
                           </div>
+
                           <small className="shipQuote__hint">
-                            Cotizamos usando la dirección seleccionada.
+                            {shouldApplyFreeShipping
+                              ? "🚚 Tu envío es gratis para esta dirección."
+                              : shipStatus === "loading"
+                              ? "Calculando envío..."
+                              : shipStatus === "ok" && shipQuote
+                              ? "Cotizamos usando la dirección seleccionada."
+                              : "Seleccioná una dirección para calcular el envío automáticamente."}
                           </small>
                         </div>
-
-                        <button
-                          id="ship_quote_btn"
-                          type="button"
-                          className="shipQuote__btn"
-                          onClick={quoteShipping}
-                          disabled={busy || shipStatus === "loading"}
-                        >
-                          {shipStatus === "loading"
-                            ? "Cotizando..."
-                            : shipQuote?.mode === "free"
-                            ? "Envío gratis"
-                            : "Cotizar envío"}
-                        </button>
                       </div>
 
                       {shipStatus === "error" && shipError ? (
                         <p className="shipQuote__error">{shipError}</p>
                       ) : null}
 
-                      {shipStatus === "ok" && shipQuote ? (
-                        <div
-                          className="shipQuote__result"
-                          role="status"
-                          aria-live="polite"
-                        >
+                      {(shouldApplyFreeShipping || (shipStatus === "ok" && shipQuote)) ? (
+                        <div className="shipQuote__result" role="status" aria-live="polite">
                           <div className="shipQuote__resultTop">
-                            <strong>{shipQuote.carrier}</strong>
-                            {shipQuote.service
-                              ? ` · ${shipQuote.service.replace(" (tarifa fija)", "")}`
-                              : ""}
+                            <strong>
+                              {shouldApplyFreeShipping ? "Envío gratis" : "Envío estándar"}
+                            </strong>
+
+                            {shouldApplyFreeShipping
+                              ? qualifiesByLocalZip
+                                ? " · Retiro / entrega local"
+                                : " · Envío incluido"
+                              : shipQuote?.service
+                              ? ` · ${shipQuote.service.replace(/\s*\(tarifa fija\)/i, "")}`
+                              : " · A domicilio"}
                           </div>
 
-                          {shipQuote.price !== 0 || shipQuote.eta ? (
-                            <div className="shipQuote__resultBottom">
-                              {shipQuote.price !== 0 ? (
-                                <div className="shipQuote__price">
-                                  {formatARS(shipQuote.price)}
-                                </div>
-                              ) : (
-                                <div />
-                              )}
-
-                              {shipQuote.eta ? (
-                                <div className="shipQuote__eta">{shipQuote.eta}</div>
-                              ) : null}
+                          <div className="shipQuote__resultBottom">
+                            <div
+                              className={`shipQuote__price ${
+                                shouldApplyFreeShipping ? "shipQuote__price--free" : ""
+                              }`}
+                            >
+                              {shouldApplyFreeShipping
+                                ? "Gratis"
+                                : formatARS(shipQuote?.price || 0)}
                             </div>
-                          ) : null}
+
+                            {!shouldApplyFreeShipping && shipQuote?.eta ? (
+                              <div className="shipQuote__eta">{shipQuote.eta}</div>
+                            ) : null}
+                          </div>
                         </div>
                       ) : null}
                     </div>
+                    
                   </div>
 
                   {canShowUpsell ? (
@@ -1407,6 +1444,30 @@ export function CartDrawer() {
                     </div>
 
                     <div className="reviewCard">
+
+                      <div className="reviewCard__block">
+                        <div className="reviewCard__title">Productos</div>
+
+                        {cart.items?.length ? (
+                          <div className="reviewItems">
+                            {cart.items.map((it) => (
+                              <div key={it.slug} className="reviewItems__row">
+                                <div className="reviewItems__main">
+                                  <span className="reviewItems__name">{it.title}</span>
+                                  <span className="reviewItems__qty">x{it.qty}</span>
+                                </div>
+
+                                <div className="reviewItems__price">
+                                  {formatARS(Number(it.price || 0) * Number(it.qty || 0))}
+                                </div>
+                              </div>
+                            ))}
+                          </div>
+                        ) : (
+                          <p>—</p>
+                        )}
+                      </div>
+
                       <div className="reviewCard__block">
                         <div className="reviewCard__title">Contacto</div>
                         <p>{name || "—"}</p>
@@ -1429,27 +1490,48 @@ export function CartDrawer() {
                       <div className="reviewCard__block">
                         <div className="reviewCard__title">Costo de envío</div>
 
-                        {shipQuote ? (
-                          <>
-                            <p>
-                              <strong>{shipQuote.carrier || "Envío estándar"}</strong>
-                              {shipQuote.service
+                        {(shouldApplyFreeShipping || (shipStatus === "ok" && shipQuote)) ? (
+                          <div
+                            className="shipQuote__result"
+                            role="status"
+                            aria-live="polite"
+                          >
+                            <div className="shipQuote__resultTop">
+                              <strong>
+                                {shouldApplyFreeShipping
+                                  ? "Envío gratis"
+                                  : "Envío estándar"}
+                              </strong>
+
+                              {shouldApplyFreeShipping
+                                ? qualifiesByLocalZip
+                                  ? " · Retiro / entrega local"
+                                  : " · Envío incluido"
+                                : shipQuote?.service
                                 ? ` · ${shipQuote.service.replace(/\s*\(tarifa fija\)/i, "")}`
                                 : " · A domicilio"}
-                            </p>
+                            </div>
 
-                            {!shouldApplyFreeShipping && shippingPrice > 0 ? (
-                              <p>{formatARS(shippingPrice)}</p>
-                            ) : (
-                              <p>Gratis</p>
-                            )}
+                            <div className="shipQuote__resultBottom">
+                              <div
+                                className={`shipQuote__price ${
+                                  shouldApplyFreeShipping ? "shipQuote__price--free" : ""
+                                }`}
+                              >
+                                {shouldApplyFreeShipping
+                                  ? "Gratis"
+                                  : formatARS(shipQuote?.price || 0)}
+                              </div>
 
-                            {shipQuote.eta ? <p>{shipQuote.eta}</p> : null}
-                          </>
-                        ) : (
-                          <p>—</p>
-                        )}
+                              {!shouldApplyFreeShipping && shipQuote?.eta ? (
+                                <div className="shipQuote__eta">{shipQuote.eta}</div>
+                              ) : null}
+                            </div>
+                          </div>
+                        ) : null}
+
                       </div>
+
                     </div>
 
                     <div className="cartFinalNudge">
@@ -1482,20 +1564,28 @@ export function CartDrawer() {
 
               <div className="cartContainer__footer">
                 <div className="cartContainer__totalLine">
-                  Productos: {formatARS(cart.total)}
+                  <span>Productos</span>
+                  <span>{formatARS(cart.total)}</span>
                 </div>
 
                 <div className="cartContainer__totalLine">
-                  Envío:{" "}
-                  {shouldApplyFreeShipping
-                    ? "Gratis"
-                    : shipQuote
-                    ? formatARS(shippingPrice)
-                    : "—"}
+                  <span>Envío</span>
+                  <span>
+                    {shouldApplyFreeShipping ? (
+                      <span style={{ fontWeight: 800, color: "#16a34a" }}>Gratis</span>
+                    ) : shipStatus === "loading" ? (
+                      "Cotizando..."
+                    ) : shipQuote ? (
+                      formatARS(shippingPrice)
+                    ) : (
+                      "Calculado según dirección"
+                    )}
+                  </span>
                 </div>
 
                 <div className="cartContainer__total">
-                  <strong>Total: {formatARS(grandTotal)}</strong>
+                  <span>Total</span>
+                  <strong>{formatARS(grandTotal)}</strong>
                 </div>
 
                 {step === 1 ? (
