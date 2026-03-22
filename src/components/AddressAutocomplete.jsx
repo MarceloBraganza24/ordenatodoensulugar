@@ -152,6 +152,7 @@ export function AddressAutocomplete({
   const debounceRef = useRef(null);
   const requestIdRef = useRef(0);
   const rootRef = useRef(null);
+  const justSelectedRef = useRef(false);
 
   const hasText = useMemo(() => String(value || "").trim().length >= 3, [value]);
 
@@ -189,7 +190,7 @@ export function AddressAutocomplete({
     };
     }, []);
 
-  useEffect(() => {
+  /* useEffect(() => {
     let mounted = true;
 
     async function init() {
@@ -213,7 +214,7 @@ export function AddressAutocomplete({
     return () => {
       mounted = false;
     };
-  }, []);
+  }, []); */
 
   useEffect(() => {
     function handleClickOutside(event) {
@@ -229,6 +230,14 @@ export function AddressAutocomplete({
 
   useEffect(() => {
     if (!ready || !hasText || disabled) {
+      setSuggestions([]);
+      setIsOpen(false);
+      setLoading(false);
+      return;
+    }
+
+    if (justSelectedRef.current) {
+      justSelectedRef.current = false;
       setSuggestions([]);
       setIsOpen(false);
       setLoading(false);
@@ -296,6 +305,8 @@ export function AddressAutocomplete({
       });
 
       const parsed = parseGoogleAddress(place);
+
+      justSelectedRef.current = true;
 
       onChange(parsed.formattedAddress || value || "");
       onSelectAddress?.(parsed);
