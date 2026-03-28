@@ -10,7 +10,11 @@ const FREE_SHIPPING_THRESHOLD = 45000;
 const FREE_SHIPPING_PRODUCT_SLUGS = ["pack-completo"];
 const CHECKOUT_DRAFT_KEY = "cart_checkout_draft_v1";
 
-const ORIGIN_ZIP = String(process.env.NEXT_PUBLIC_CA_POSTAL_ORIGIN || "")
+const ORIGIN_ZIP = String(
+  process.env.NEXT_PUBLIC_CA_POSTAL_ORIGIN ||
+    process.env.NEXT_PUBLIC_CA_POSTAL_CODE_ORIGIN ||
+    ""
+)
   .replace(/\D/g, "")
   .slice(0, 4);
 
@@ -18,8 +22,6 @@ function isFreeShippingZip(destZip, provinceCode) {
   const dz = String(destZip || "").replace(/\D/g, "").slice(0, 4);
   return provinceCode === "B" && ORIGIN_ZIP && dz && dz === ORIGIN_ZIP;
 }
-
-
 
 const PROVINCES_AR = [
   { name: "Buenos Aires", code: "B" },
@@ -104,8 +106,98 @@ function getFlatShippingQuote({ provinceCode }) {
   };
 }
 
+function getDeliveryEtaByZone({ provinceCode, qualifiesByLocalZip }) {
+  if (qualifiesByLocalZip) {
+    return "Coordinar entrega";
+  }
+
+  const p = String(provinceCode || "").toUpperCase().trim();
+
+  if (p === "B" || p === "C") {
+    return "3 a 7 días hábiles";
+  }
+
+  if (["R", "Q", "U", "Z", "V"].includes(p)) {
+    return "4 a 10 días hábiles";
+  }
+
+  return "3 a 9 días hábiles";
+}
+
+function getEstimatedShippingForStep1({ provinceCode }) {
+  const p = String(provinceCode || "").toUpperCase().trim();
+
+  if (p === "B" || p === "C") return 6900;
+
+  const patagonia = ["R", "Q", "U", "Z", "V"];
+  if (patagonia.includes(p)) return 11900;
+
+  if (p) return 8900;
+
+  return 6900;
+}
+
 function getShortAddress({ streetName, streetNumber }) {
   return [streetName, streetNumber].filter(Boolean).join(" ");
+}
+
+function normalizeQuoteFromApi(data, fallbackProvinceCode) {
+  if (!data || typeof data !== "object") return null;
+
+  const q = data.quote;
+  if (q && typeof q === "object" && Number(q.price) >= 0) {
+    return {
+      carrier: q.carrier || q.provider || "Envío estándar",
+      service: q.service || "A domicilio",
+      price: Number(q.price || 0),
+      eta: q.eta || "",
+      deliveredType: q.deliveredType || "D",
+      mode: q.mode || "paid",
+    };
+  }
+
+  if (Number.isFinite(Number(data.shippingPrice))) {
+    return {
+      carrier:
+        data.provider === "correo_argentino"
+          ? "Correo Argentino"
+          : "Envío estándar",
+      service:
+        data.quote?.rates?.[0]?.productName ||
+        data.quote?.rates?.[0]?.productType ||
+        "A domicilio",
+      price: Number(data.shippingPrice || 0),
+      eta: data.quote?.rates?.[0]?.deliveryTimeMin
+        ? `${data.quote.rates[0].deliveryTimeMin}-${data.quote.rates[0].deliveryTimeMax} días`
+        : "",
+      deliveredType: data.deliveredTypeUsed || "D",
+      mode: data.fallbackUsed ? "flat" : "paid",
+    };
+  }
+
+  if (fallbackProvinceCode) {
+    return getFlatShippingQuote({ provinceCode: fallbackProvinceCode });
+  }
+
+  return null;
+}
+
+function buildQuoteKey({
+  itemsSig,
+  province,
+  city,
+  postalCode,
+  formattedAddress,
+  googlePlaceId,
+}) {
+  return [
+    itemsSig || "",
+    String(province || "").trim().toUpperCase(),
+    String(city || "").trim().toLowerCase(),
+    normalizeZip(postalCode || ""),
+    String(formattedAddress || "").trim(),
+    String(googlePlaceId || "").trim(),
+  ].join("|");
 }
 
 export function CartDrawer() {
@@ -121,7 +213,7 @@ export function CartDrawer() {
   const [phone, setPhone] = useState("");
   const [email, setEmail] = useState("");
 
-  // Address autocomplete + shipping
+  // Address
   const [addressQuery, setAddressQuery] = useState("");
   const [formattedAddress, setFormattedAddress] = useState("");
   const [googlePlaceId, setGooglePlaceId] = useState("");
@@ -132,7 +224,7 @@ export function CartDrawer() {
   const [streetName, setStreetName] = useState("");
   const [streetNumber, setStreetNumber] = useState("");
 
-  // Final delivery details
+  // Delivery details
   const [apt, setApt] = useState("");
   const [dni, setDni] = useState("");
   const [notes, setNotes] = useState("");
@@ -145,10 +237,11 @@ export function CartDrawer() {
   const [upsell, setUpsell] = useState(null);
   const [upsellBusy, setUpsellBusy] = useState(false);
 
-  // Shipping quote
+  // Shipping
   const [shipQuote, setShipQuote] = useState(null);
   const [shipStatus, setShipStatus] = useState("idle");
   const [shipError, setShipError] = useState("");
+  const [confirmedQuoteKey, setConfirmedQuoteKey] = useState("");
 
   const zip = normalizeZip(postalCode);
 
@@ -181,8 +274,82 @@ export function CartDrawer() {
   const shouldApplyFreeShipping =
     hasFreeShippingProduct || qualifiesByAmount || qualifiesByLocalZip;
 
-  const shippingPrice = shouldApplyFreeShipping ? 0 : shipQuote?.price || 0;
+  const hasAddressForQuote = Boolean(
+    formattedAddress &&
+      googlePlaceId &&
+      province &&
+      city.trim() &&
+      streetName.trim() &&
+      isValidZip(postalCode)
+  );
+
+  const currentQuoteKey = useMemo(() => {
+    return buildQuoteKey({
+      itemsSig,
+      province,
+      city,
+      postalCode,
+      formattedAddress,
+      googlePlaceId,
+    });
+  }, [itemsSig, province, city, postalCode, formattedAddress, googlePlaceId]);
+
+  const hasCalculatedShipping =
+    shouldApplyFreeShipping ||
+    (shipStatus === "ok" &&
+      !!shipQuote &&
+      !!confirmedQuoteKey &&
+      confirmedQuoteKey === currentQuoteKey);
+
+  const resolvedShipQuote = useMemo(() => {
+    if (shouldApplyFreeShipping) {
+      return {
+        carrier: "Gratis",
+        service: qualifiesByLocalZip
+          ? "Retiro / entrega local"
+          : hasFreeShippingProduct
+          ? "Incluido en este pack"
+          : `Gratis desde ${formatARS(FREE_SHIPPING_THRESHOLD)}`,
+        price: 0,
+        eta: qualifiesByLocalZip ? "Coordinar entrega" : "",
+        deliveredType: "D",
+        mode: "free",
+      };
+    }
+
+    if (hasCalculatedShipping && shipQuote) {
+      return shipQuote;
+    }
+
+    return null;
+  }, [
+    shouldApplyFreeShipping,
+    qualifiesByLocalZip,
+    hasFreeShippingProduct,
+    hasCalculatedShipping,
+    shipQuote,
+  ]);
+
+  const previewShippingPrice = useMemo(() => {
+    if (shouldApplyFreeShipping) return 0;
+
+    // Mientras NO haya cotización confirmada para la combinación actual,
+    // mostramos el mínimo/base visual del step 1.
+    return getEstimatedShippingForStep1({ provinceCode: "" });
+  }, [shouldApplyFreeShipping]);
+
+  const shippingPrice = useMemo(() => {
+    if (hasCalculatedShipping && resolvedShipQuote) {
+      return Number(resolvedShipQuote.price || 0);
+    }
+
+    return previewShippingPrice;
+  }, [hasCalculatedShipping, resolvedShipQuote, previewShippingPrice]);
+
   const grandTotal = cart.total + shippingPrice;
+
+  const shippingLineLabel = !hasCalculatedShipping ? "Envío desde" : "Envío";
+  const totalLineLabel = !hasCalculatedShipping ? "Total estimado" : "Total";
 
   const hasSelectedAddress =
     !!formattedAddress &&
@@ -193,20 +360,38 @@ export function CartDrawer() {
 
   const missingStreetNumber = hasSelectedAddress && !streetNumber.trim();
 
-  /* const scrollToTop = () => {
-    requestAnimationFrame(() => {
-      panelScrollRef.current?.scrollTo({ top: 0, behavior: "smooth" });
-    });
-  };
+  const shippingEtaLabel = useMemo(() => {
+    if (shouldApplyFreeShipping) {
+      return qualifiesByLocalZip ? "Coordinación local" : "Envío incluido";
+    }
 
-  const scrollCartToTop = () => {
-    const el = panelScrollRef.current;
-    if (!el) return;
+    if (!hasCalculatedShipping) {
+      return "";
+    }
 
-    requestAnimationFrame(() => {
-      el.scrollTop = 0;
+    return resolvedShipQuote?.eta || "";
+  }, [
+    shouldApplyFreeShipping,
+    qualifiesByLocalZip,
+    hasCalculatedShipping,
+    resolvedShipQuote,
+  ]);
+
+  const deliveryEtaText = useMemo(() => {
+    if (qualifiesByLocalZip) {
+      return "Coordinar entrega";
+    }
+
+    if (resolvedShipQuote?.eta) {
+      return resolvedShipQuote.eta;
+    }
+
+    return getDeliveryEtaByZone({
+      provinceCode: province,
+      qualifiesByLocalZip,
     });
-  }; */
+  }, [resolvedShipQuote, province, qualifiesByLocalZip]);
+
   useEffect(() => {
     const el = panelScrollRef.current;
     if (!el) return;
@@ -226,7 +411,6 @@ export function CartDrawer() {
     });
   };
 
-  // responsive
   useEffect(() => {
     const check = () => setIsDesktop(window.innerWidth >= 1024);
     check();
@@ -234,7 +418,6 @@ export function CartDrawer() {
     return () => window.removeEventListener("resize", check);
   }, []);
 
-  // lock scroll
   useEffect(() => {
     if (!cart.isOpen) return;
     const prev = document.documentElement.style.overflow;
@@ -244,7 +427,6 @@ export function CartDrawer() {
     };
   }, [cart.isOpen]);
 
-  // esc
   useEffect(() => {
     if (!cart.isOpen) return;
     const onKey = (e) => e.key === "Escape" && cart.close();
@@ -252,7 +434,6 @@ export function CartDrawer() {
     return () => window.removeEventListener("keydown", onKey);
   }, [cart.isOpen, cart.close]);
 
-  // fetch upsell
   useEffect(() => {
     if (!cart.isOpen) return;
 
@@ -274,7 +455,6 @@ export function CartDrawer() {
     };
   }, [cart.isOpen]);
 
-  // load draft once
   useEffect(() => {
     if (draftLoadedRef.current) return;
 
@@ -309,6 +489,7 @@ export function CartDrawer() {
       setShipQuote(draft.shipQuote || null);
       setShipStatus(draft.shipQuote ? "ok" : "idle");
       setShipError("");
+      setConfirmedQuoteKey(draft.confirmedQuoteKey || "");
     } catch {
       // ignore
     } finally {
@@ -316,7 +497,6 @@ export function CartDrawer() {
     }
   }, []);
 
-  // save draft
   useEffect(() => {
     if (!draftLoadedRef.current) return;
 
@@ -338,6 +518,7 @@ export function CartDrawer() {
         dni,
         notes,
         shipQuote,
+        confirmedQuoteKey,
       };
 
       sessionStorage.setItem(CHECKOUT_DRAFT_KEY, JSON.stringify(draft));
@@ -361,9 +542,9 @@ export function CartDrawer() {
     dni,
     notes,
     shipQuote,
+    confirmedQuoteKey,
   ]);
 
-  // if cart emptied manually, clear draft too
   useEffect(() => {
     if (cart.items.length > 0) return;
 
@@ -375,55 +556,77 @@ export function CartDrawer() {
 
     setStep(1);
     setErr("");
-  }, [cart.items.length]);
-
-  // reset shipping when items change
-  useEffect(() => {
-    if (!cart.isOpen) return;
-    if (!shipQuote) return;
-    if (shipQuote?.mode === "flat") return;
-
-    setShipQuote(null);
-    setShipStatus("idle");
-    setShipError("El carrito cambió. Volvé a cotizar el envío.");
-    if (step > 1) setStep(1);
-  }, [cart.isOpen, itemsSig]); // eslint-disable-line react-hooks/exhaustive-deps
-
-  // recalc to free if needed
-  useEffect(() => {
-    if (!cart.isOpen) return;
-    if (!shipQuote) return;
-
-    if (shouldApplyFreeShipping && shipQuote.price !== 0) {
-      setShipQuote({
-        carrier: "Gratis",
-        service: hasFreeShippingProduct
-          ? "(incluido en este pack)"
-          : qualifiesByLocalZip
-          ? "(retiro en Coronel Suárez)"
-          : `(gratis desde ${formatARS(FREE_SHIPPING_THRESHOLD)})`,
-        price: 0,
-        eta: "",
-        mode: "free",
-      });
-      setShipStatus("ok");
-    }
-  }, [
-    cart.isOpen,
-    shipQuote,
-    shouldApplyFreeShipping,
-    hasFreeShippingProduct,
-    qualifiesByLocalZip,
-  ]);
-
-  // invalidate quote when core address changes
-  useEffect(() => {
-    if (!shipQuote) return;
     setShipQuote(null);
     setShipStatus("idle");
     setShipError("");
-    if (step > 1) setStep(1);
-  }, [province, city, postalCode]); // eslint-disable-line react-hooks/exhaustive-deps
+    setConfirmedQuoteKey("");
+  }, [cart.items.length]);
+
+  // Reconciliación única de cotización confirmada
+  useEffect(() => {
+    if (!cart.isOpen) return;
+
+    if (!hasAddressForQuote) {
+      if (shipQuote || shipStatus !== "idle" || confirmedQuoteKey) {
+        setShipQuote(null);
+        setShipStatus("idle");
+        setShipError("");
+        setConfirmedQuoteKey("");
+        if (step > 2) setStep(2);
+      }
+      return;
+    }
+
+    if (shouldApplyFreeShipping) {
+      const freeQuote = {
+        carrier: "Gratis",
+        service: qualifiesByLocalZip
+          ? "Retiro / entrega local"
+          : hasFreeShippingProduct
+          ? "Incluido en este pack"
+          : `Gratis desde ${formatARS(FREE_SHIPPING_THRESHOLD)}`,
+        price: 0,
+        eta: qualifiesByLocalZip ? "Coordinar entrega" : "",
+        deliveredType: "D",
+        mode: "free",
+      };
+
+      if (
+        !shipQuote ||
+        shipQuote.price !== freeQuote.price ||
+        shipQuote.service !== freeQuote.service ||
+        shipQuote.mode !== freeQuote.mode ||
+        confirmedQuoteKey !== currentQuoteKey ||
+        shipStatus !== "ok"
+      ) {
+        setShipQuote(freeQuote);
+        setShipStatus("ok");
+        setShipError("");
+        setConfirmedQuoteKey(currentQuoteKey);
+      }
+
+      return;
+    }
+
+    if (confirmedQuoteKey && confirmedQuoteKey !== currentQuoteKey) {
+      setShipQuote(null);
+      setShipStatus("idle");
+      setShipError("El carrito o la dirección cambió. Volvé a recalcular el envío.");
+      setConfirmedQuoteKey("");
+      if (step > 2) setStep(2);
+    }
+  }, [
+    cart.isOpen,
+    hasAddressForQuote,
+    shouldApplyFreeShipping,
+    qualifiesByLocalZip,
+    hasFreeShippingProduct,
+    currentQuoteKey,
+    confirmedQuoteKey,
+    shipQuote,
+    shipStatus,
+    step,
+  ]);
 
   const upsellAlreadyInCart = useMemo(() => {
     if (!upsell?.slug) return false;
@@ -439,13 +642,8 @@ export function CartDrawer() {
       cart.addItem(upsell, 1);
     } finally {
       setTimeout(() => setUpsellBusy(false), 180);
-      setTimeout(() => {
-        if (shipQuote) quoteShipping();
-      }, 240);
     }
   };
-
-  // const quoteTimeoutRef = useRef(null);
 
   const handleAddressSelected = async (addr) => {
     const nextAddressQuery = addr?.label || addr?.formattedAddress || "";
@@ -468,6 +666,8 @@ export function CartDrawer() {
 
     await quoteShipping({
       addressQuery: nextAddressQuery,
+      formattedAddress: nextFormattedAddress,
+      googlePlaceId: nextGooglePlaceId,
       province: nextProvince,
       city: nextCity,
       postalCode: nextPostalCode,
@@ -479,8 +679,17 @@ export function CartDrawer() {
     setShipError("");
     setShipStatus("idle");
     setShipQuote(null);
+    setConfirmedQuoteKey("");
 
     const currentAddressQuery = (overrides.addressQuery ?? addressQuery ?? "").trim();
+    const currentFormattedAddress = (
+      overrides.formattedAddress ??
+      formattedAddress ??
+      currentAddressQuery
+    ).trim();
+    const currentGooglePlaceId = String(
+      overrides.googlePlaceId ?? googlePlaceId ?? ""
+    ).trim();
     const currentProvince = overrides.province ?? province;
     const currentCity = (overrides.city ?? city ?? "").trim();
     const currentPostalCode = normalizeZip(overrides.postalCode ?? postalCode);
@@ -488,6 +697,13 @@ export function CartDrawer() {
     if (!currentAddressQuery) {
       setShipStatus("error");
       setShipError("Ingresá tu dirección.");
+      scrollToField("ship_address_search");
+      return;
+    }
+
+    if (!currentFormattedAddress || !currentGooglePlaceId) {
+      setShipStatus("error");
+      setShipError("Elegí una dirección válida de la lista.");
       scrollToField("ship_address_search");
       return;
     }
@@ -543,7 +759,7 @@ export function CartDrawer() {
       let service = "(incluido en tu compra)";
 
       if (qualifiesByLocalZipNow) {
-        service = "(retiro en Coronel Suárez)";
+        service = "(retiro / entrega local)";
       } else if (qualifiesByAmountNow) {
         service = `(gratis desde ${formatARS(FREE_SHIPPING_THRESHOLD)})`;
       } else if (hasFreeShippingProductInCart) {
@@ -552,12 +768,24 @@ export function CartDrawer() {
 
       setShipQuote({
         carrier: "Gratis",
-        service: "(incluido en tu compra)",
+        service,
         price: 0,
-        eta: "",
+        eta: qualifiesByLocalZipNow ? "Coordinar entrega" : "",
+        deliveredType: "D",
         mode: "free",
       });
       setShipStatus("ok");
+      setShipError("");
+      setConfirmedQuoteKey(
+        buildQuoteKey({
+          itemsSig,
+          province: currentProvince,
+          city: currentCity,
+          postalCode: currentPostalCode,
+          formattedAddress: currentFormattedAddress,
+          googlePlaceId: currentGooglePlaceId,
+        })
+      );
       return;
     }
 
@@ -579,58 +807,46 @@ export function CartDrawer() {
       });
 
       const data = await res.json().catch(() => ({}));
-      if (!res.ok || !data?.ok) {
+      const normalized = normalizeQuoteFromApi(data, currentProvince);
+
+      if (!res.ok || !normalized) {
         throw new Error(data?.error || "No se pudo cotizar.");
       }
 
-      setShipQuote(data.quote);
+      setShipQuote(normalized);
       setShipStatus("ok");
+      setShipError("");
+      setConfirmedQuoteKey(
+        buildQuoteKey({
+          itemsSig,
+          province: currentProvince,
+          city: currentCity,
+          postalCode: currentPostalCode,
+          formattedAddress: currentFormattedAddress,
+          googlePlaceId: currentGooglePlaceId,
+        })
+      );
     } catch (e) {
-      const msg = String(e?.message || "");
-
-      if (
-        msg.toLowerCase().includes("faltan credenciales") ||
-        msg.toLowerCase().includes("no disponible")
-      ) {
-        const q = getFlatShippingQuote({ provinceCode: currentProvince });
-        setShipQuote(q);
-        setShipStatus("ok");
-        return;
-      }
-
-      setShipStatus("error");
-      setShipError(msg || "No pudimos cotizar el envío. Probá de nuevo.");
+      const q = getFlatShippingQuote({ provinceCode: currentProvince });
+      setShipQuote(q);
+      setShipStatus("ok");
+      setShipError("");
+      setConfirmedQuoteKey(
+        buildQuoteKey({
+          itemsSig,
+          province: currentProvince,
+          city: currentCity,
+          postalCode: currentPostalCode,
+          formattedAddress: currentFormattedAddress,
+          googlePlaceId: currentGooglePlaceId,
+        })
+      );
     }
   }
 
   const validateStep1 = () => {
     if (!cart.items.length) {
       return { msg: "Tu carrito está vacío.", fieldId: "" };
-    }
-
-    if (!addressQuery.trim()) {
-      return { msg: "Ingresá tu dirección.", fieldId: "ship_address_search" };
-    }
-
-    if (!formattedAddress || !googlePlaceId) {
-      return {
-        msg: "Elegí una dirección de la lista de sugerencias para continuar.",
-        fieldId: "ship_address_search",
-      };
-    }
-
-    if (!province || !city.trim() || !postalCode.trim() || !streetName.trim()) {
-      return {
-        msg: "La dirección seleccionada está incompleta. Probá con otra opción sugerida.",
-        fieldId: "ship_address_search",
-      };
-    }
-
-    if (!shouldApplyFreeShipping && !shipQuote) {
-      return {
-        msg: "Primero esperá que se calcule el envío antes de continuar.",
-        fieldId: "ship_address_search",
-      };
     }
 
     return { msg: "", fieldId: "" };
@@ -664,6 +880,24 @@ export function CartDrawer() {
 
     if (!isValidEmail(email.trim())) {
       return { msg: "Email inválido.", fieldId: "buyer_email" };
+    }
+
+    if (!addressQuery.trim()) {
+      return { msg: "Ingresá tu dirección.", fieldId: "ship_address_search" };
+    }
+
+    if (!province || !city.trim() || !postalCode.trim() || !streetName.trim()) {
+      return {
+        msg: "La dirección seleccionada está incompleta. Probá con otra opción sugerida.",
+        fieldId: "ship_address_search",
+      };
+    }
+
+    if (!hasCalculatedShipping) {
+      return {
+        msg: "Primero calculá el envío con una dirección válida antes de continuar.",
+        fieldId: "ship_address_search",
+      };
     }
 
     return { msg: "", fieldId: "" };
@@ -755,12 +989,14 @@ export function CartDrawer() {
     }
 
     if (step === 2) {
-      const { msg, fieldId } = validateStep2();
-      if (msg) {
-        setErr(msg);
-        if (fieldId) scrollToField(fieldId);
+      const result = validateStep2();
+
+      if (result.msg) {
+        setErr(result.msg);
+        if (result.fieldId) scrollToField(result.fieldId);
         return;
       }
+
       setStep(3);
       return;
     }
@@ -808,25 +1044,16 @@ export function CartDrawer() {
       return;
     }
 
-    const shippingPayload = shouldApplyFreeShipping
-      ? {
-          carrier: "Gratis",
-          service: qualifiesByLocalZip
-            ? "Retiro / entrega local"
-            : "Envío incluido",
-          price: 0,
-          eta: "",
-          mode: "free",
-        }
-      : shipQuote
-      ? {
-          carrier: shipQuote.carrier || "Envío estándar",
-          service: shipQuote.service || "A domicilio",
-          price: Number(shipQuote.price || 0),
-          eta: shipQuote.eta || "",
-          mode: shipQuote.mode || "paid",
-        }
-      : null;
+    const shippingPayload =
+      hasCalculatedShipping && resolvedShipQuote
+        ? {
+            carrier: resolvedShipQuote.carrier || "Envío estándar",
+            service: resolvedShipQuote.service || "A domicilio",
+            price: Number(resolvedShipQuote.price || 0),
+            eta: resolvedShipQuote.eta || "",
+            mode: resolvedShipQuote.mode || "paid",
+          }
+        : null;
 
     if (!shippingPayload) {
       setErr("No pudimos calcular el envío. Probá de nuevo.");
@@ -918,41 +1145,14 @@ export function CartDrawer() {
                 ))}
               </div>
 
-              {/* {step > 1 ? (
-                <div className="cartMiniSummary">
-                  <div className="cartMiniSummary__row">
-                    <span>Productos</span>
-                    <strong>{formatARS(cart.total)}</strong>
-                  </div>
-
-                  <div className="cartMiniSummary__row">
-                    <span>Envío</span>
-                    <strong>
-                      {shouldApplyFreeShipping
-                        ? "Gratis"
-                        : shipQuote
-                        ? formatARS(shippingPrice)
-                        : "—"}
-                    </strong>
-                  </div>
-
-                  <div className="cartMiniSummary__row cartMiniSummary__row--total">
-                    <span>Total</span>
-                    <strong>{formatARS(grandTotal)}</strong>
-                  </div>
-                </div>
-              ) : null} */}
-
               {step === 1 ? (
                 <>
-                  {/* 🔥 CONVERSION: frase emocional arriba del carrito */}
                   <div className="cartStepHero">
-                    {/* <p className="cartStepHero__eyebrow">Tu carrito</p> */}
                     <h3 className="cartStepHero__title">
                       Estás a un paso de ordenar tu cocina ✨
                     </h3>
                     <p className="cartStepHero__text">
-                      Completá tu compra en pocos pasos de forma simple y segura.
+                      Comprá de forma rápida, segura y sin complicaciones.
                     </p>
                   </div>
 
@@ -961,7 +1161,9 @@ export function CartDrawer() {
                       <li key={it.slug} className="cartItem">
                         <div className="cartItem__info">
                           <strong className="cartItem__title">{it.title}</strong>
-                          <div className="cartItem__price">{formatARS(it.price)} c/u</div>
+                          <div className="cartItem__price">
+                            {formatARS(it.price)} c/u
+                          </div>
                         </div>
 
                         <div className="cartItem__actions">
@@ -999,6 +1201,18 @@ export function CartDrawer() {
                   </ul>
 
                   <div className="cartContainer__divider" />
+
+                  <div className="shippingSimple" aria-live="polite">
+                    {shouldApplyFreeShipping ? (
+                      <p className="shippingSimple__ok">
+                        🚚 ¡Tu pedido tiene envío GRATIS!
+                      </p>
+                    ) : (
+                      <p className="shippingSimple__info">
+                        🚚 Envío desde: <strong>{formatARS(shippingPrice)}</strong>
+                      </p>
+                    )}
+                  </div>
 
                   <div className="freeShippingProgress" aria-live="polite">
                     {hasFreeShippingProduct ? (
@@ -1047,14 +1261,76 @@ export function CartDrawer() {
                     ) : null}
                   </div>
 
-                  <div className="cartContainer__divider" />
+                  <div className="cartTrust">
+                    <div className="cartTrust__item">🔒 Pago 100% seguro con Mercado Pago</div>
+                    <div className="cartTrust__item">💳 Tarjetas y cuotas disponibles</div>
+                    <div className="cartTrust__item">🚚 Envíos a todo el país</div>
+                  </div>
+                </>
+              ) : null}
 
+              {step === 2 ? (
+                <>
                   <div className="cartStepCard">
                     <div className="cartStepCard__head">
-                      <h3 className="cartContainer__sectionTitle">1. Dirección y envío</h3>
+                      <h3 className="cartContainer__sectionTitle">2. Tus datos y dirección</h3>
                       <p className="cartStepCard__helper">
-                        Escribí tu dirección real y elegí una de las opciones sugeridas para
-                        calcular tu envío correctamente.
+                        Completá tus datos y elegí tu dirección para ver el envío antes de
+                        pagar.
+                      </p>
+                    </div>
+
+                    <div className="cartContainer__grid">
+                      <div className="cartContainer__field">
+                        <label htmlFor="buyer_name">Nombre y apellido</label>
+                        <input
+                          id="buyer_name"
+                          value={name}
+                          onChange={(e) => setName(e.target.value)}
+                          placeholder="Tu nombre y apellido"
+                          autoComplete="name"
+                          inputMode="text"
+                        />
+                      </div>
+
+                      <div className="cartContainer__field">
+                        <label htmlFor="buyer_phone">Teléfono (WhatsApp)</label>
+                        <input
+                          id="buyer_phone"
+                          value={phone}
+                          onChange={(e) => setPhone(e.target.value)}
+                          placeholder="Ej: 291 1234567"
+                          autoComplete="tel"
+                          inputMode="tel"
+                        />
+                      </div>
+
+                      <div className="cartContainer__field cartContainer__field--wide">
+                        <label htmlFor="buyer_email">Email</label>
+                        <input
+                          id="buyer_email"
+                          value={email}
+                          type="email"
+                          onChange={(e) => setEmail(e.target.value)}
+                          placeholder="tuemail@email.com"
+                          autoComplete="email"
+                          inputMode="email"
+                        />
+                        <small className="cartContainer__fieldHint">
+                          Te enviamos la confirmación y el seguimiento de tu pedido.
+                        </small>
+                      </div>
+                    </div>
+
+                    <div className="cartContainer__divider" />
+
+                    <div className="cartStepCard__head">
+                      <h3 className="cartContainer__sectionTitle">
+                        ¿Dónde querés recibir tu pedido?
+                      </h3>
+                      <p className="cartStepCard__helper">
+                        Escribí tu dirección real y elegí una opción sugerida para calcular el
+                        envío correctamente.
                       </p>
                     </div>
 
@@ -1072,9 +1348,7 @@ export function CartDrawer() {
                     <div className="addressSummary">
                       <div className="addressSummary__row">
                         <span>Calle</span>
-                        <strong>
-                          {getShortAddress({ streetName, streetNumber }) || "—"}
-                        </strong>
+                        <strong>{getShortAddress({ streetName, streetNumber }) || "—"}</strong>
                       </div>
 
                       <div className="addressSummary__row">
@@ -1108,8 +1382,8 @@ export function CartDrawer() {
                               ? "🚚 Tu envío es gratis para esta dirección."
                               : shipStatus === "loading"
                               ? "Calculando envío..."
-                              : shipStatus === "ok" && shipQuote
-                              ? "Cotizamos usando la dirección seleccionada."
+                              : shipStatus === "ok" && resolvedShipQuote
+                              ? "Ya calculamos tu envío con la dirección seleccionada."
                               : "Seleccioná una dirección para calcular el envío automáticamente."}
                           </small>
                         </div>
@@ -1119,7 +1393,7 @@ export function CartDrawer() {
                         <p className="shipQuote__error">{shipError}</p>
                       ) : null}
 
-                      {(shouldApplyFreeShipping || (shipStatus === "ok" && shipQuote)) ? (
+                      {(shouldApplyFreeShipping || (shipStatus === "ok" && resolvedShipQuote)) ? (
                         <div className="shipQuote__result" role="status" aria-live="polite">
                           <div className="shipQuote__resultTop">
                             <strong>
@@ -1130,8 +1404,8 @@ export function CartDrawer() {
                               ? qualifiesByLocalZip
                                 ? " · Retiro / entrega local"
                                 : " · Envío incluido"
-                              : shipQuote?.service
-                              ? ` · ${shipQuote.service.replace(/\s*\(tarifa fija\)/i, "")}`
+                              : resolvedShipQuote?.service
+                              ? ` · ${resolvedShipQuote.service.replace(/\s*\(tarifa fija\)/i, "")}`
                               : " · A domicilio"}
                           </div>
 
@@ -1143,162 +1417,15 @@ export function CartDrawer() {
                             >
                               {shouldApplyFreeShipping
                                 ? "Gratis"
-                                : formatARS(shipQuote?.price || 0)}
+                                : formatARS(resolvedShipQuote?.price || 0)}
                             </div>
 
-                            {!shouldApplyFreeShipping && shipQuote?.eta ? (
-                              <div className="shipQuote__eta">{shipQuote.eta}</div>
+                            {!shouldApplyFreeShipping && resolvedShipQuote?.eta ? (
+                              <div className="shipQuote__eta">{resolvedShipQuote.eta}</div>
                             ) : null}
                           </div>
                         </div>
                       ) : null}
-                    </div>
-                    
-                  </div>
-
-                  {canShowUpsell ? (
-                    <>
-                      <div className="cartUpsellDivider">
-                        <span>Opcional</span>
-                      </div>
-
-                      <p className="cartUpsell__intro">Ya que estás ordenando tu cocina…</p>
-                      <p className="cartUpsell__intro cartUpsell__intro--strong">
-                        💡 Sumalo ahora y aprovechá el mismo envío.
-                      </p>
-
-                      <div className="cartUpsell" aria-label="Oferta recomendada">
-                        <div className="cartUpsell__badge">PREMIUM</div>
-
-                        <div className="cartUpsell__row">
-                          <div className="cartUpsell__imgWrap">
-                            <img
-                              className="cartUpsell__img"
-                              src={upsell.imageUrl}
-                              alt={upsell.title}
-                              loading="lazy"
-                            />
-                          </div>
-
-                          <div className="cartUpsell__content">
-                            <div className="cartUpsell__title">{upsell.title}</div>
-                            <div className="cartUpsell__sub">
-                              Aprovechá el mismo envío y completá tu compra con este extra.
-                            </div>
-
-                            <div className="cartUpsell__meta">
-                              <span className="cartUpsell__price">
-                                <div>{formatARS(upsell.price)}</div>
-                                <div className="cartUpsell__price__underPrice">
-                                  Entra en el mismo envío
-                                </div>
-                              </span>
-
-                              <span className="cartUpsell__mini">
-                                3 cuotas sin interés <br /> de $11.000
-                              </span>
-                            </div>
-
-                            <div className="cartUpsell__actions">
-                              <button
-                                type="button"
-                                className="cartUpsell__btn cartUpsell__btn--primary"
-                                onClick={addUpsell}
-                                disabled={busy || upsellBusy}
-                              >
-                                {upsellBusy ? "Agregando..." : "Sumar a mi compra"}
-                              </button>
-
-                              <button
-                                type="button"
-                                className="cartUpsell__btn cartUpsell__btn--ghost"
-                                onClick={() => {
-                                  cart.close();
-                                  setTimeout(() => {
-                                    const el = document.getElementById("upsell");
-                                    if (el) {
-                                      el.scrollIntoView({
-                                        behavior: "smooth",
-                                        block: "start",
-                                      });
-                                    }
-                                  }, 120);
-                                }}
-                                disabled={busy}
-                              >
-                                Ver
-                              </button>
-                            </div>
-                          </div>
-                        </div>
-                      </div>
-                    </>
-                  ) : null}
-
-                  {/* 🔥 CONVERSION: bloque de confianza */}
-                  <div className="cartTrust">
-                    <div className="cartTrust__item">🔒 Compra 100% segura con Mercado Pago</div>
-                    <div className="cartTrust__item">🚚 Envíos a todo el país</div>
-                    <div className="cartTrust__item">📦 Despacho en 24/48 hs</div>
-                    <div className="cartTrust__item">💬 Soporte por WhatsApp</div>
-                  </div>
-                </>
-              ) : null}
-
-              {step === 2 ? (
-                <>
-                  <div className="cartStepCard">
-                    <div className="cartStepCard__head">
-                      <h3 className="cartContainer__sectionTitle">2. Completá tus datos</h3>
-                      <p className="cartStepCard__helper">
-                        Completá tus datos para recibir tu pedido y el seguimiento en tiempo
-                        real.
-                      </p>
-                    </div>
-
-                    <div className="cartContainer__grid">
-                      <div className="cartContainer__field">
-                        <label htmlFor="buyer_name">Nombre y apellido</label>
-                        <input
-                          id="buyer_name"
-                          value={name}
-                          onChange={(e) => setName(e.target.value)}
-                          placeholder="Tu nombre y apellido"
-                          autoComplete="name"
-                          inputMode="text"
-                        />
-                      </div>
-
-                      <div className="cartContainer__field">
-                        <label htmlFor="buyer_phone">Teléfono (WhatsApp)</label>
-                        <input
-                          id="buyer_phone"
-                          value={phone}
-                          onChange={(e) => setPhone(e.target.value)}
-                          placeholder="Ej: 291 1234567"
-                          autoComplete="tel"
-                          inputMode="tel"
-                        />
-                        {/* <small className="cartContainer__fieldHint">
-                          Te contactamos por WhatsApp para coordinar el envío.
-                        </small> */}
-                      </div>
-
-                      <div className="cartContainer__field cartContainer__field--wide">
-                        <label htmlFor="buyer_email">Email</label>
-                        <input
-                          id="buyer_email"
-                          value={email}
-                          type="email"
-                          onChange={(e) => setEmail(e.target.value)}
-                          placeholder="tuemail@email.com"
-                          autoComplete="email"
-                          inputMode="email"
-                        />
-                        <small className="cartContainer__fieldHint">
-                          Te enviamos la confirmación y el seguimiento de tu pedido.
-                        </small>
-                      </div>
                     </div>
 
                     <div className="cartStepSecurity">
@@ -1309,9 +1436,7 @@ export function CartDrawer() {
                   </div>
 
                   <div className="cartTrust">
-                    <div className="cartTrust__item">
-                      🔒 Pago 100% seguro con Mercado Pago
-                    </div>
+                    <div className="cartTrust__item">🔒 Pago 100% seguro con Mercado Pago</div>
                     <div className="cartTrust__item">🚚 Envíos a todo el país</div>
                     <div className="cartTrust__item">📦 Despacho en 24/48 hs</div>
                     <div className="cartTrust__item">💬 Soporte por WhatsApp</div>
@@ -1327,8 +1452,8 @@ export function CartDrawer() {
                         3. Detalles finales de entrega
                       </h3>
                       <p className="cartStepCard__helper">
-                        Revisá los datos de entrega para asegurarte de que tu pedido llegue
-                        sin problemas.
+                        Revisá tu dirección y completá los datos finales para que el pedido
+                        llegue sin problemas.
                       </p>
                     </div>
 
@@ -1445,10 +1570,87 @@ export function CartDrawer() {
                     </div>
                   </div>
 
+                  {canShowUpsell ? (
+                    <>
+                      <div className="cartUpsellDivider">
+                        <span>Opcional</span>
+                      </div>
+
+                      <p className="cartUpsell__intro">Ya que estás ordenando tu cocina…</p>
+                      <p className="cartUpsell__intro cartUpsell__intro--strong">
+                        💡 Sumalo ahora y aprovechá el mismo envío.
+                      </p>
+
+                      <div className="cartUpsell" aria-label="Oferta recomendada">
+                        <div className="cartUpsell__badge">PREMIUM</div>
+
+                        <div className="cartUpsell__row">
+                          <div className="cartUpsell__imgWrap">
+                            <img
+                              className="cartUpsell__img"
+                              src={upsell.imageUrl}
+                              alt={upsell.title}
+                              loading="lazy"
+                            />
+                          </div>
+
+                          <div className="cartUpsell__content">
+                            <div className="cartUpsell__title">{upsell.title}</div>
+                            <div className="cartUpsell__sub">
+                              Aprovechá el mismo envío y completá tu compra con este extra.
+                            </div>
+
+                            <div className="cartUpsell__meta">
+                              <span className="cartUpsell__price">
+                                <div>{formatARS(upsell.price)}</div>
+                                <div className="cartUpsell__price__underPrice">
+                                  Entra en el mismo envío
+                                </div>
+                              </span>
+
+                              <span className="cartUpsell__mini">
+                                3 cuotas sin interés <br /> de $11.000
+                              </span>
+                            </div>
+
+                            <div className="cartUpsell__actions">
+                              <button
+                                type="button"
+                                className="cartUpsell__btn cartUpsell__btn--primary"
+                                onClick={addUpsell}
+                                disabled={busy || upsellBusy}
+                              >
+                                {upsellBusy ? "Agregando..." : "Sumar a mi compra"}
+                              </button>
+
+                              <button
+                                type="button"
+                                className="cartUpsell__btn cartUpsell__btn--ghost"
+                                onClick={() => {
+                                  cart.close();
+                                  setTimeout(() => {
+                                    const el = document.getElementById("upsell");
+                                    if (el) {
+                                      el.scrollIntoView({
+                                        behavior: "smooth",
+                                        block: "start",
+                                      });
+                                    }
+                                  }, 120);
+                                }}
+                                disabled={busy}
+                              >
+                                Ver
+                              </button>
+                            </div>
+                          </div>
+                        </div>
+                      </div>
+                    </>
+                  ) : null}
+
                   <div className="cartTrust">
-                    <div className="cartTrust__item">
-                      🔒 Pago 100% seguro con Mercado Pago
-                    </div>
+                    <div className="cartTrust__item">🔒 Pago 100% seguro con Mercado Pago</div>
                     <div className="cartTrust__item">
                       💳 Podés pagar con tarjeta, débito o saldo
                     </div>
@@ -1462,16 +1664,13 @@ export function CartDrawer() {
                 <>
                   <div className="cartStepCard">
                     <div className="cartStepCard__head">
-                      <h3 className="cartContainer__sectionTitle">
-                        4. Confirmá tu compra
-                      </h3>
+                      <h3 className="cartContainer__sectionTitle">4. Confirmá tu compra</h3>
                       <p className="cartStepCard__helper">
                         Revisá tus datos y finalizá el pago de forma segura.
                       </p>
                     </div>
 
                     <div className="reviewCard">
-
                       <div className="reviewCard__block">
                         <div className="reviewCard__title">Productos</div>
 
@@ -1517,25 +1716,19 @@ export function CartDrawer() {
                       <div className="reviewCard__block">
                         <div className="reviewCard__title">Costo de envío</div>
 
-                        {(shouldApplyFreeShipping || (shipStatus === "ok" && shipQuote)) ? (
-                          <div
-                            className="shipQuote__result"
-                            role="status"
-                            aria-live="polite"
-                          >
+                        {(shouldApplyFreeShipping || resolvedShipQuote) ? (
+                          <div className="shipQuote__result" role="status" aria-live="polite">
                             <div className="shipQuote__resultTop">
                               <strong>
-                                {shouldApplyFreeShipping
-                                  ? "Envío gratis"
-                                  : "Envío estándar"}
+                                {shouldApplyFreeShipping ? "Envío gratis" : "Envío estándar"}
                               </strong>
 
                               {shouldApplyFreeShipping
                                 ? qualifiesByLocalZip
                                   ? " · Retiro / entrega local"
                                   : " · Envío incluido"
-                                : shipQuote?.service
-                                ? ` · ${shipQuote.service.replace(/\s*\(tarifa fija\)/i, "")}`
+                                : resolvedShipQuote?.service
+                                ? ` · ${resolvedShipQuote.service.replace(/\s*\(tarifa fija\)/i, "")}`
                                 : " · A domicilio"}
                             </div>
 
@@ -1547,18 +1740,36 @@ export function CartDrawer() {
                               >
                                 {shouldApplyFreeShipping
                                   ? "Gratis"
-                                  : formatARS(shipQuote?.price || 0)}
+                                  : formatARS(resolvedShipQuote?.price || 0)}
                               </div>
 
-                              {!shouldApplyFreeShipping && shipQuote?.eta ? (
-                                <div className="shipQuote__eta">{shipQuote.eta}</div>
+                              {!shouldApplyFreeShipping && resolvedShipQuote?.eta ? (
+                                <div className="shipQuote__eta">{resolvedShipQuote.eta}</div>
                               ) : null}
                             </div>
                           </div>
-                        ) : null}
+                        ) : (
+                          <p>—</p>
+                        )}
+                      </div>
+                    </div>
 
+                    <div className="cartFinalSummary">
+                      <div>
+                        📦 Recibís en: <strong>{city || "—"}</strong>,{" "}
+                        <strong>{provinceName || "—"}</strong>
                       </div>
 
+                      <div>
+                        🚚 Entrega estimada:{" "}
+                        <strong>{deliveryEtaText}</strong>
+                      </div>
+                    </div>
+
+                    <div className="cartFinalTrust">
+                      <div>🔒 Pago seguro con Mercado Pago</div>
+                      <div>💳 Tarjetas, cuotas y dinero en cuenta</div>
+                      <div>📦 Despachamos en 24/48 hs</div>
                     </div>
 
                     <div className="cartFinalNudge">
@@ -1566,19 +1777,14 @@ export function CartDrawer() {
                         Estás a un paso de completar tu compra ✨
                       </p>
                     </div>
-                  </div>
 
-                  <div className="cartTrust">
-                    <div className="cartTrust__item">
-                      🔒 Pago 100% seguro con Mercado Pago
-                    </div>
-                    <div className="cartTrust__item">
-                      💳 Tarjeta, débito o saldo en cuenta
-                    </div>
-                    <div className="cartTrust__item">📦 Despacho en 24/48 hs</div>
-                    <div className="cartTrust__item">
-                      💬 Soporte por WhatsApp si necesitás ayuda
-                    </div>
+                    <p className="cartFinalNote">
+                      No se realizará ningún cargo hasta confirmar el pago en Mercado Pago.
+                    </p>
+
+                    <p className="cartFinalUrgency">
+                      ⏳ Alta demanda hoy — asegurá tu compra ahora
+                    </p>
                   </div>
                 </>
               ) : null}
@@ -1590,29 +1796,41 @@ export function CartDrawer() {
               ) : null}
 
               <div className="cartContainer__footer">
-                <div className="cartContainer__totalLine">
-                  <span>Productos</span>
-                  <span>{formatARS(cart.total)}</span>
+                <div className="cartContainer__summary">
+                  <div className="cartContainer__totalLine">
+                    <span>Productos</span>
+                    <span>{formatARS(cart.total)}</span>
+                  </div>
+
+                  <div className="cartContainer__totalLine">
+                    <span>{shippingLineLabel}</span>
+
+                    <div className="cartContainer__shippingSummary">
+                      <span>
+                        {shouldApplyFreeShipping ? (
+                          <span className="cartContainer__shippingFree">Gratis</span>
+                        ) : (
+                          formatARS(shippingPrice)
+                        )}
+                      </span>
+
+                      {shippingEtaLabel ? (
+                        <small className="cartContainer__shippingEta">
+                          {shippingEtaLabel}
+                        </small>
+                      ) : null}
+                    </div>
+                  </div>
+
+                  <div className="cartContainer__total">
+                    <span>{totalLineLabel}</span>
+                    <strong>{formatARS(grandTotal)}</strong>
+                  </div>
                 </div>
 
-                <div className="cartContainer__totalLine">
-                  <span>Envío</span>
-                  <span>
-                    {shouldApplyFreeShipping ? (
-                      <span style={{ fontWeight: 800, color: "#16a34a" }}>Gratis</span>
-                    ) : shipStatus === "loading" ? (
-                      "Cotizando..."
-                    ) : shipQuote ? (
-                      formatARS(shippingPrice)
-                    ) : (
-                      "Calculado según dirección"
-                    )}
-                  </span>
-                </div>
-
-                <div className="cartContainer__total">
-                  <span>Total</span>
-                  <strong>{formatARS(grandTotal)}</strong>
+                <div className="cartContainer__footerTrust">
+                  <span>🔒 Pago seguro con Mercado Pago</span>
+                  <span>🚚 Envíos a todo el país</span>
                 </div>
 
                 {step === 1 ? (
@@ -1639,7 +1857,7 @@ export function CartDrawer() {
                       disabled={busy}
                       className="cartContainer__btn cartContainer__btn--primary"
                     >
-                      Ir a datos de envío →
+                      Continuar compra →
                     </button>
                   </div>
                 ) : step === 2 ? (
@@ -1659,7 +1877,7 @@ export function CartDrawer() {
                       disabled={busy}
                       className="cartContainer__btn cartContainer__btn--primary"
                     >
-                      Ir a datos de entrega →
+                      Continuar → Revisar entrega
                     </button>
                   </div>
                 ) : step === 3 ? (
@@ -1677,31 +1895,37 @@ export function CartDrawer() {
                       type="button"
                       onClick={goNext}
                       disabled={busy}
-                      className="cartContainer__btn cartContainer__btn--primary"
+                      className="cartContainer__btn cartContainer__btn--confirm"
                     >
-                      Ir a pagar →
+                      Confirmar compra
                     </button>
                   </div>
                 ) : step === 4 ? (
-                  <div className="cartContainer__footerButtons">
-                    <button
-                      type="button"
-                      onClick={goBack}
-                      disabled={busy}
-                      className="cartContainer__btn cartContainer__btn--ghost"
-                    >
-                      Volver
-                    </button>
+                  <>
+                    <div className="cartContainer__finalHint">
+                      Vas a finalizar el pago en Mercado Pago de forma segura.
+                    </div>
 
-                    <button
-                      type="button"
-                      onClick={checkout}
-                      disabled={busy}
-                      className="cartContainer__btn cartContainer__btn--primary"
-                    >
-                      {busy ? "Procesando..." : "Pagar con Mercado Pago →"}
-                    </button>
-                  </div>
+                    <div className="cartContainer__footerButtons cartContainer__footerButtons--final">
+                      <button
+                        type="button"
+                        onClick={goBack}
+                        disabled={busy}
+                        className="cartContainer__btn cartContainer__btn--ghost"
+                      >
+                        Volver
+                      </button>
+
+                      <button
+                        type="button"
+                        onClick={checkout}
+                        disabled={busy}
+                        className="cartContainer__btn cartContainer__btn--primary cartContainer__btn--pay"
+                      >
+                        {busy ? "Procesando..." : "Confirmar compra y pagar 🔒"}
+                      </button>
+                    </div>
+                  </>
                 ) : (
                   <div className="cartContainer__footerButtons">
                     <button

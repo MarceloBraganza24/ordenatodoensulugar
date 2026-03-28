@@ -9,7 +9,7 @@ import { recordEvent } from "@/lib/analyticsStore";
 import { getOrCreateSid } from "@/lib/analytics";
 import { quoteCorreo } from "@/lib/shipping/correo";
 
-// ---------- Zod (limpio y alineado al model nuevo) ----------
+// ---------- Zod ----------
 const ShippingAddressSchema = z
   .object({
     province: z.string().optional(),
@@ -29,7 +29,7 @@ const BuyerSchema = z.object({
   email: z.string().email(),
   shippingAddress: ShippingAddressSchema,
 
-  // compat TEMPORARIA si tu front todavía manda buyer.shipping (borrar cuando migres)
+  // compat TEMPORARIA si tu front todavía manda buyer.shipping
   shipping: z.any().optional(),
 });
 
@@ -44,7 +44,6 @@ const QuoteSchema = z
   .optional()
   .default({});
 
-  
 const MetaSchema = z
   .object({
     eventId: z.string().optional().default(""),
@@ -53,7 +52,7 @@ const MetaSchema = z
   })
   .optional()
   .default({});
-  
+
 const CheckoutSchema = z.object({
   items: z
     .array(z.object({ slug: z.string(), qty: z.number().int().min(1).max(20) }))
@@ -96,7 +95,12 @@ function safeNum(x) {
 function hasAnyAddress(a) {
   if (!a || typeof a !== "object") return false;
   return Boolean(
-    a.postalCode || a.city || a.province || a.streetName || a.streetNumber || a.street
+    a.postalCode ||
+      a.city ||
+      a.province ||
+      a.streetName ||
+      a.streetNumber ||
+      a.street
   );
 }
 
@@ -127,8 +131,57 @@ function mustUseFallbackShipping(err) {
     msg.includes("403") ||
     msg.includes("timeout") ||
     msg.includes("econn") ||
-    msg.includes("network")
+    msg.includes("network") ||
+    msg.includes("sin tarifas")
   );
+}
+
+function getFallbackShippingQuote({ zip, originZip, provinceCode }) {
+  const destinationZip = normZip(zip);
+  const origin = normZip(originZip);
+  const p = String(provinceCode || "").toUpperCase();
+
+  if (origin && destinationZip && origin === destinationZip) {
+    return {
+      provider: "local",
+      service: "Envío gratis zona local",
+      eta: "Coordinar entrega",
+      price: 0,
+      deliveredType: "D",
+      validTo: null,
+    };
+  }
+
+  if (p === "B" || p === "C") {
+    return {
+      provider: "zones",
+      service: "Tarifa fija Buenos Aires / CABA",
+      eta: "3 a 7 días hábiles",
+      price: 6900,
+      deliveredType: "D",
+      validTo: null,
+    };
+  }
+
+  if (["R", "Q", "U", "Z", "V"].includes(p)) {
+    return {
+      provider: "zones",
+      service: "Tarifa fija zona lejana",
+      eta: "4 a 10 días hábiles",
+      price: 11900,
+      deliveredType: "D",
+      validTo: null,
+    };
+  }
+
+  return {
+    provider: "zones",
+    service: "Tarifa fija resto del país",
+    eta: "3 a 9 días hábiles",
+    price: 8900,
+    deliveredType: "D",
+    validTo: null,
+  };
 }
 
 // ---------- route ----------
@@ -142,7 +195,6 @@ export async function POST(req) {
 
   const { items, buyer, shipping: shippingFromClient, meta = {} } = parsed.data;
 
-  // ✅ buyerNormalized alineado al model: buyer.shippingAddress
   const rawAddr = hasAnyAddress(buyer?.shippingAddress)
     ? buyer.shippingAddress
     : buyer?.shipping;
@@ -167,27 +219,18 @@ export async function POST(req) {
 
   await connectDB();
 
-  /* const existingPending = await Order.findOne({
-    "buyer.email": buyerNormalized.email,
-    status: "pending",
-  }).sort({ createdAt: -1 });
-
-  if (existingPending) {
-    return NextResponse.json({
-      ok: true,
-      init_point: `https://www.mercadopago.com.ar/checkout/v1/redirect?pref_id=${existingPending.mp.preferenceId}`,
-      externalReference: existingPending.externalReference,
-      publicCode: existingPending.publicCode,
-      accessKey: existingPending.accessKey,
-    });
-  } */
-
   // productos
   const slugs = items.map((i) => i.slug);
-  const products = await Product.find({ slug: { $in: slugs }, isActive: true }).lean();
+  const products = await Product.find({
+    slug: { $in: slugs },
+    isActive: true,
+  }).lean();
 
   if (products.length !== slugs.length) {
-    return NextResponse.json({ error: "Producto no encontrado o inactivo." }, { status: 404 });
+    return NextResponse.json(
+      { error: "Producto no encontrado o inactivo." },
+      { status: 404 }
+    );
   }
 
   const orderItems = items.map((i) => {
@@ -201,7 +244,10 @@ export async function POST(req) {
     };
   });
 
-  const itemsTotal = orderItems.reduce((acc, it) => acc + it.qty * it.unitPrice, 0);
+  const itemsTotal = orderItems.reduce(
+    (acc, it) => acc + it.qty * it.unitPrice,
+    0
+  );
 
   const hasFreeShippingProduct = orderItems.some((it) =>
     FREE_SHIPPING_PRODUCT_SLUGS.includes(it.slug)
@@ -209,20 +255,24 @@ export async function POST(req) {
 
   const qualifiesByAmount = itemsTotal >= FREE_SHIPPING_THRESHOLD;
 
-  // ✅ Re-cotizamos server-side
   let shipQuote = null;
 
-  // ✅ Envío gratis si el CP destino es el mismo que el origen (vendedor)
-  const originZip = normZip(process.env.NEXT_PUBLIC_CA_POSTAL_ORIGIN || "");
-
-  // province puede venir como "B" o como "Buenos Aires" (según tu UI).
-  // Tu UI hoy manda code, pero lo normalizo por las dudas.
-  const provRaw = String(shippingAddress?.province || "").trim().toUpperCase();
-  const provCode = provRaw.length === 1 ? provRaw : (
-    provRaw.includes("BUENOS") ? "B" : provRaw
+  const originZip = normZip(
+    process.env.CA_POSTAL_CODE_ORIGIN ||
+      process.env.NEXT_PUBLIC_CA_POSTAL_ORIGIN ||
+      ""
   );
 
-  const isLocalFreeShipping = provCode === "B" && !!originZip && zip === originZip;
+  const provRaw = String(shippingAddress?.province || "").trim().toUpperCase();
+  const provCode =
+    provRaw.length === 1
+      ? provRaw
+      : provRaw.includes("BUENOS")
+      ? "B"
+      : provRaw;
+
+  const isLocalFreeShipping =
+    provCode === "B" && !!originZip && zip === originZip;
 
   const shouldApplyFreeShipping =
     isLocalFreeShipping || qualifiesByAmount || hasFreeShippingProduct;
@@ -251,8 +301,10 @@ export async function POST(req) {
       validTo: null,
     };
   } else {
+    let correoQuote = null;
+
     try {
-      shipQuote = await quoteCorreo({
+      correoQuote = await quoteCorreo({
         postalCodeDestination: zip,
         items: orderItems.map((it) => ({ slug: it.slug, qty: it.qty })),
         deliveredType: "D",
@@ -265,57 +317,57 @@ export async function POST(req) {
         );
       }
 
-      const clientPrice = safeNum(shippingFromClient?.price);
-      const clientMode = String(shippingFromClient?.mode || "").toLowerCase();
+      console.warn("[checkout] Correo no disponible, uso fallback:", e?.message || e);
+    }
 
-      // ✅ si el front dice "free", lo aceptamos SOLO si cumple BA + mismo CP origen
-      if (clientMode === "free" && shouldApplyFreeShipping) {
-        let provider = "promo";
-        let service = shippingFromClient?.service || "Envío gratis";
+    if (correoQuote) {
+      shipQuote = correoQuote;
+    } else {
+      console.warn("[checkout] Correo sin tarifas usables, uso fallback interno", {
+        destinationZip: zip,
+        provinceCode: provCode,
+      });
 
-        if (isLocalFreeShipping) {
-          provider = "local";
-        }
-
-        shipQuote = {
-          provider,
-          service,
-          eta: shippingFromClient?.eta || (isLocalFreeShipping ? "Coordinar entrega" : ""),
-          price: 0,
-          deliveredType: "D",
-          validTo: null,
-        };
-      } else if (clientPrice > 0) {
-        shipQuote = {
-          provider: "zones",
-          service: shippingFromClient?.service || "Tarifa fija",
-          eta: shippingFromClient?.eta || "",
-          price: clientPrice,
-          deliveredType: "D",
-          validTo: null,
-        };
-      } else {
-        return NextResponse.json(
-          { error: "Cotizá el envío antes de pagar." },
-          { status: 400 }
-        );
-      }
+      shipQuote = getFallbackShippingQuote({
+        zip,
+        originZip,
+        provinceCode: provCode,
+      });
     }
   }
 
   const shippingTotal = safeNum(shipQuote?.price || 0);
+  const clientShippingPrice = safeNum(shippingFromClient?.price);
 
-  // ✅ Si NO es local gratis, exigimos que sea > 0
+  if (
+    clientShippingPrice > 0 &&
+    shippingTotal > 0 &&
+    clientShippingPrice !== shippingTotal
+  ) {
+    console.warn("[checkout] shipping mismatch", {
+      clientShippingPrice,
+      serverShippingPrice: shippingTotal,
+      zip,
+      provinceCode: provCode,
+      clientShipping: shippingFromClient,
+      serverShipQuote: shipQuote,
+    });
+  }
+
   if (!shouldApplyFreeShipping && shippingTotal <= 0) {
-    return NextResponse.json({ error: "Cotizá el envío antes de pagar." }, { status: 400 });
+    return NextResponse.json(
+      { error: "Cotizá el envío antes de pagar." },
+      { status: 400 }
+    );
   }
 
   const total = itemsTotal + shippingTotal;
 
   const siteUrl = process.env.NEXT_PUBLIC_SITE_URL || "http://localhost:3000";
-  const externalReference = `order_${Date.now()}_${Math.random().toString(16).slice(2)}`;
+  const externalReference = `order_${Date.now()}_${Math.random()
+    .toString(16)
+    .slice(2)}`;
 
-  // tracking headers
   const utm = {
     source: h(req, "x-utm-source"),
     medium: h(req, "x-utm-medium"),
@@ -326,11 +378,9 @@ export async function POST(req) {
   const path = h(req, "x-path");
   const ref = h(req, "x-ref");
 
-  // response placeholder para setear sid
   const res = NextResponse.json({ ok: true });
   const sid = getOrCreateSid(req, res);
 
-  // MP preference
   const mpItems = [
     ...orderItems.map((it) => ({
       id: it.slug,
@@ -362,7 +412,6 @@ export async function POST(req) {
     },
   });
 
-  // publicCode unique
   let publicCode = makePublicCode();
   for (let i = 0; i < 5; i++) {
     const exists = await Order.findOne({ publicCode }).lean();
@@ -389,13 +438,13 @@ export async function POST(req) {
     },
     externalReference,
 
-    // ✅ shippingData (no colisiona con buyer.shippingAddress)
     shippingData: {
       provider: shipQuote?.provider || "correo-argentino",
       deliveredType: shipQuote?.deliveredType || "D",
       postalCodeOrigin: originZip || process.env.NEXT_PUBLIC_CA_POSTAL_ORIGIN || "",
       postalCodeDestination: zip,
       quote: {
+        carrier: String(shipQuote?.provider || shippingFromClient?.carrier || ""),
         service: String(shipQuote?.service || shippingFromClient?.service || ""),
         price: shippingTotal,
         eta: String(shipQuote?.eta || shippingFromClient?.eta || ""),
@@ -419,7 +468,6 @@ export async function POST(req) {
     referrer: ref,
   });
 
-  // analytics server-side
   try {
     await recordEvent({
       type: "begin_checkout",
@@ -456,7 +504,6 @@ export async function POST(req) {
     console.warn("[analytics] checkout track failed:", e?.message || e);
   }
 
-  // respuesta final + preserva sid cookie
   const finalRes = NextResponse.json({
     ok: true,
     init_point: preference.init_point,
