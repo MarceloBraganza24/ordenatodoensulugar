@@ -60,3 +60,13 @@ env:
     secret: metaAccessToken
   - variable: META_DATASET_ID
     secret: metaDataSetId
+  - variable: CA_BASE_URL
+    value: "https://api.correoargentino.com.ar/micorreo/v1"
+  - variable: CA_POSTAL_CODE_ORIGIN
+    value: "7540"
+  - variable: CA_USERNAME
+    secret: CA_USERNAME
+  - variable: CA_PASSWORD
+    secret: CA_PASSWORD
+  - variable: CA_CUSTOMER_ID
+    secret: CA_CUSTOMER_ID

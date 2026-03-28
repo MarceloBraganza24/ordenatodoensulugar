@@ -190,32 +190,6 @@ export function AddressAutocomplete({
     };
     }, []);
 
-  /* useEffect(() => {
-    let mounted = true;
-
-    async function init() {
-      try {
-        const placesLib = await loadGooglePlacesLibrary();
-        if (!mounted) return;
-
-        placesLibRef.current = placesLib;
-        if (placesLib?.AutocompleteSessionToken) {
-          sessionTokenRef.current = new placesLib.AutocompleteSessionToken();
-        }
-        setReady(true);
-      } catch (err) {
-        if (!mounted) return;
-        setLocalError("No pudimos cargar el autocompletado de direcciones.");
-      }
-    }
-
-    init();
-
-    return () => {
-      mounted = false;
-    };
-  }, []); */
-
   useEffect(() => {
     function handleClickOutside(event) {
       if (!rootRef.current?.contains(event.target)) {

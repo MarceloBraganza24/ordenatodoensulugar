@@ -1,13 +1,15 @@
 // /lib/shipping/correo.js
+import { Buffer } from "buffer";
 
 const CA_BASE_URL =
   process.env.CA_BASE_URL ||
   "https://apitest.correoargentino.com.ar/micorreo/v1";
 
-const CA_USER = process.env.CA_USER;
+const CA_USER = process.env.CA_USER || process.env.CA_USERNAME;
 const CA_PASSWORD = process.env.CA_PASSWORD;
 const CA_CUSTOMER_ID = process.env.CA_CUSTOMER_ID;
-const CA_POSTAL_ORIGIN = process.env.CA_POSTAL_ORIGIN;
+const CA_POSTAL_ORIGIN =
+  process.env.CA_POSTAL_ORIGIN || process.env.CA_POSTAL_CODE_ORIGIN;
 
 let tokenCache = {
   token: null,
@@ -17,6 +19,13 @@ let tokenCache = {
 function assertEnv(name, value) {
   if (!value) throw new Error(`Missing env: ${name}`);
   return value;
+}
+
+function parseExpireToMs(expire) {
+  if (!expire) return 0;
+  const normalized = String(expire).replace(" ", "T");
+  const ms = new Date(normalized).getTime();
+  return Number.isFinite(ms) ? ms : 0;
 }
 
 /* =========================================
@@ -30,10 +39,10 @@ async function getToken() {
     return tokenCache.token;
   }
 
-  assertEnv("CA_USER", CA_USER);
-  assertEnv("CA_PASSWORD", CA_PASSWORD);
+  const user = assertEnv("CA_USER / CA_USERNAME", CA_USER);
+  const password = assertEnv("CA_PASSWORD", CA_PASSWORD);
 
-  const basic = Buffer.from(`${CA_USER}:${CA_PASSWORD}`).toString("base64");
+  const basic = Buffer.from(`${user}:${password}`).toString("base64");
 
   const res = await fetch(`${CA_BASE_URL}/token`, {
     method: "POST",
@@ -50,16 +59,18 @@ async function getToken() {
 
   const data = await res.json();
 
+  const expireMs = parseExpireToMs(data?.expire || data?.expires);
+
   tokenCache = {
     token: data.token,
-    expiresAt: Date.now() + 10 * 60 * 1000, // 10 min
+    expiresAt: expireMs || Date.now() + 10 * 60 * 1000,
   };
 
   return data.token;
 }
 
 /* =========================================
-   2️⃣ DIMENSIONES (ajustar a tus productos)
+   2️⃣ DIMENSIONES
 ========================================= */
 
 const PRODUCT_DIMENSIONS = {
@@ -90,14 +101,12 @@ function computeCartDimensions(items) {
     const qty = Number(item.qty || 0);
 
     totalWeight += dims.weight * qty;
-
     maxHeight = Math.max(maxHeight, dims.height);
     maxWidth = Math.max(maxWidth, dims.width);
     maxLength = Math.max(maxLength, dims.length);
   }
 
   if (totalWeight <= 0) {
-    // fallback seguro
     return {
       weight: 1500,
       height: 10,
@@ -123,8 +132,11 @@ export async function quoteCorreo({
   items,
   deliveredType = "D",
 }) {
-  assertEnv("CA_CUSTOMER_ID", CA_CUSTOMER_ID);
-  assertEnv("CA_POSTAL_ORIGIN", CA_POSTAL_ORIGIN);
+  const customerId = assertEnv("CA_CUSTOMER_ID", CA_CUSTOMER_ID);
+  const postalCodeOrigin = assertEnv(
+    "CA_POSTAL_ORIGIN / CA_POSTAL_CODE_ORIGIN",
+    CA_POSTAL_ORIGIN
+  );
 
   if (!postalCodeDestination) {
     throw new Error("Missing postalCodeDestination");
@@ -135,14 +147,13 @@ export async function quoteCorreo({
   }
 
   const token = await getToken();
-
   const dimensions = computeCartDimensions(items);
 
   const body = {
-    customerId: CA_CUSTOMER_ID,
-    postalCodeOrigin: CA_POSTAL_ORIGIN,
-    postalCodeDestination,
-    deliveredType, // "D" domicilio, "S" sucursal
+    customerId,
+    postalCodeOrigin,
+    postalCodeDestination: String(postalCodeDestination).trim(),
+    deliveredType,
     dimensions,
   };
 
@@ -164,22 +175,30 @@ export async function quoteCorreo({
     );
   }
 
-  const best = data?.rates?.[0];
+  const rates = Array.isArray(data?.rates) ? data.rates : [];
+  const best =
+    rates.find((r) => r?.deliveredType === deliveredType) || rates[0] || null;
 
   if (!best) {
     throw new Error("Sin tarifas disponibles");
   }
 
+  const price = Number(best.price || 0);
+
+  if (!Number.isFinite(price) || price <= 0) {
+    throw new Error("Tarifa inválida de Correo");
+  }
+
   return {
     provider: "correo-argentino",
-    service: best.productName || best.productType,
-    price: Number(best.price || 0),
+    service: best.productName || best.productType || "Correo Argentino",
+    price,
     eta:
       best.deliveryTimeMin && best.deliveryTimeMax
         ? `${best.deliveryTimeMin}-${best.deliveryTimeMax} días`
-        : null,
-    deliveredType: best.deliveredType,
+        : "",
+    deliveredType: best.deliveredType || deliveredType,
     raw: best,
-    validTo: data.validTo,
+    validTo: data.validTo || null,
   };
 }
