@@ -7,7 +7,9 @@ import { Order } from "@/models/Order";
 import { mpPreference } from "@/lib/mp";
 import { recordEvent } from "@/lib/analyticsStore";
 import { getOrCreateSid } from "@/lib/analytics";
-import { quoteCorreo } from "@/lib/shipping/correo";
+import { quoteCorreoOrder } from "@/lib/correoArgentino";
+import { getLearnedRate } from "@/lib/shipping/getLearnedRate";
+import { getPackageKeyFromDimensions } from "@/lib/shipping/fallbackLearning";
 
 // ---------- Zod ----------
 const ShippingAddressSchema = z
@@ -59,7 +61,7 @@ const CheckoutSchema = z.object({
     .min(1),
   buyer: BuyerSchema,
   zip: z.string().optional(),
-  shipping: QuoteSchema, // quote del front (solo hint)
+  shipping: QuoteSchema,
   meta: MetaSchema,
 });
 
@@ -132,7 +134,9 @@ function mustUseFallbackShipping(err) {
     msg.includes("timeout") ||
     msg.includes("econn") ||
     msg.includes("network") ||
-    msg.includes("sin tarifas")
+    msg.includes("sin tarifas") ||
+    msg.includes("aborted") ||
+    msg.includes("fetch failed")
   );
 }
 
@@ -140,6 +144,7 @@ function getFallbackShippingQuote({ zip, originZip, provinceCode }) {
   const destinationZip = normZip(zip);
   const origin = normZip(originZip);
   const p = String(provinceCode || "").toUpperCase();
+  const prefix = destinationZip.charAt(0);
 
   if (origin && destinationZip && origin === destinationZip) {
     return {
@@ -152,18 +157,32 @@ function getFallbackShippingQuote({ zip, originZip, provinceCode }) {
     };
   }
 
-  if (p === "B" || p === "C") {
+  // AMBA / cercanos
+  if (["1", "2", "3"].includes(prefix)) {
     return {
       provider: "zones",
-      service: "Tarifa fija Buenos Aires / CABA",
-      eta: "3 a 7 días hábiles",
+      service: "Tarifa fija AMBA / cercanos",
+      eta: "2 a 5 días hábiles",
       price: 6900,
       deliveredType: "D",
       validTo: null,
     };
   }
 
-  if (["R", "Q", "U", "Z", "V"].includes(p)) {
+  // Interior / centro / sur bonaerense
+  if (["4", "5", "6", "7", "8"].includes(prefix)) {
+    return {
+      provider: "zones",
+      service: "Tarifa fija interior",
+      eta: "2 a 6 días hábiles",
+      price: 7900,
+      deliveredType: "D",
+      validTo: null,
+    };
+  }
+
+  // Patagonia más lejana
+  if (["9"].includes(prefix) || ["R", "Q", "U", "Z", "V"].includes(p)) {
     return {
       provider: "zones",
       service: "Tarifa fija zona lejana",
@@ -181,6 +200,182 @@ function getFallbackShippingQuote({ zip, originZip, provinceCode }) {
     price: 8900,
     deliveredType: "D",
     validTo: null,
+  };
+}
+
+function pickPackaging(items) {
+  const normalizedItems = Array.isArray(items) ? items : [];
+
+  const qtyBySlug = normalizedItems.reduce((acc, item) => {
+    const slug = String(item.slug || "").trim();
+    const qty = Number(item.qty || 0);
+    if (!slug || qty <= 0) return acc;
+    acc[slug] = (acc[slug] || 0) + qty;
+    return acc;
+  }, {});
+
+  const esencialQty = qtyBySlug["pack-esencial"] || 0;
+  const familiarQty = qtyBySlug["pack-familiar"] || 0;
+  const completoQty = qtyBySlug["pack-completo"] || 0;
+  const cubierteroQty = qtyBySlug["cubiertero-bambu"] || 0;
+
+  const totalMainPacks = esencialQty + familiarQty + completoQty;
+
+  if (totalMainPacks === 0 && cubierteroQty === 0) {
+    return {
+      weight: 500,
+      height: 12,
+      width: 20,
+      length: 30,
+    };
+  }
+
+  if (
+    esencialQty === 1 &&
+    familiarQty === 0 &&
+    completoQty === 0 &&
+    cubierteroQty === 0
+  ) {
+    return {
+      weight: 435 + 180,
+      height: 15,
+      width: 20,
+      length: 20,
+    };
+  }
+
+  if (
+    esencialQty === 1 &&
+    familiarQty === 0 &&
+    completoQty === 0 &&
+    cubierteroQty === 1
+  ) {
+    return {
+      weight: 1335 + 300,
+      height: 25,
+      width: 35,
+      length: 45,
+    };
+  }
+
+  if (
+    esencialQty === 0 &&
+    familiarQty === 1 &&
+    completoQty === 0 &&
+    cubierteroQty === 0
+  ) {
+    return {
+      weight: 955 + 260,
+      height: 25,
+      width: 20,
+      length: 25,
+    };
+  }
+
+  if (
+    esencialQty === 0 &&
+    familiarQty === 1 &&
+    completoQty === 0 &&
+    cubierteroQty === 1
+  ) {
+    return {
+      weight: 1855 + 380,
+      height: 35,
+      width: 35,
+      length: 45,
+    };
+  }
+
+  if (
+    esencialQty === 0 &&
+    familiarQty === 0 &&
+    completoQty === 1 &&
+    cubierteroQty === 0
+  ) {
+    return {
+      weight: 2410 + 420,
+      height: 25,
+      width: 35,
+      length: 40,
+    };
+  }
+
+  if (
+    esencialQty === 0 &&
+    familiarQty === 0 &&
+    completoQty === 1 &&
+    cubierteroQty === 1
+  ) {
+    return {
+      weight: 3310 + 500,
+      height: 35,
+      width: 35,
+      length: 45,
+    };
+  }
+
+  if (totalMainPacks === 0 && cubierteroQty >= 1) {
+    return {
+      weight: 900 + 220 * cubierteroQty,
+      height: 10,
+      width: 35,
+      length: 45,
+    };
+  }
+
+  const productsWeight =
+    esencialQty * 435 +
+    familiarQty * 955 +
+    completoQty * 2410 +
+    cubierteroQty * 900;
+
+  const estimatedBoxesWeight =
+    esencialQty * 180 +
+    familiarQty * 260 +
+    completoQty * 420 +
+    cubierteroQty * 220;
+
+  const totalWeight = productsWeight + estimatedBoxesWeight;
+
+  let length = 20;
+  let width = 20;
+  let height = 15;
+
+  if (completoQty > 0) {
+    length = 40;
+    width = 35;
+    height = 25;
+  } else if (familiarQty > 0) {
+    length = 25;
+    width = 20;
+    height = 25;
+  } else if (esencialQty > 0) {
+    length = 20;
+    width = 20;
+    height = 15;
+  }
+
+  if (cubierteroQty > 0 && totalMainPacks > 0) {
+    length = 45;
+    width = 35;
+    height = 35;
+  }
+
+  if (totalMainPacks >= 2) {
+    height += 10;
+  }
+
+  if (totalMainPacks >= 3) {
+    height += 10;
+    length = Math.max(length, 45);
+    width = Math.max(width, 35);
+  }
+
+  return {
+    weight: Math.round(totalWeight),
+    height: Math.round(height),
+    width: Math.round(width),
+    length: Math.round(length),
   };
 }
 
@@ -219,7 +414,6 @@ export async function POST(req) {
 
   await connectDB();
 
-  // productos
   const slugs = items.map((i) => i.slug);
   const products = await Product.find({
     slug: { $in: slugs },
@@ -303,8 +497,13 @@ export async function POST(req) {
   } else {
     let correoQuote = null;
 
+    const dimensions = pickPackaging(
+      orderItems.map((it) => ({ slug: it.slug, qty: it.qty }))
+    );
+    const packageKey = getPackageKeyFromDimensions(dimensions);
+
     try {
-      correoQuote = await quoteCorreo({
+      correoQuote = await quoteCorreoOrder({
         postalCodeDestination: zip,
         items: orderItems.map((it) => ({ slug: it.slug, qty: it.qty })),
         deliveredType: "D",
@@ -317,22 +516,54 @@ export async function POST(req) {
         );
       }
 
-      console.warn("[checkout] Correo no disponible, uso fallback:", e?.message || e);
+      console.warn("[checkout] Correo no disponible, uso learned/fallback:", e?.message || e);
     }
 
     if (correoQuote) {
       shipQuote = correoQuote;
     } else {
-      console.warn("[checkout] Correo sin tarifas usables, uso fallback interno", {
-        destinationZip: zip,
-        provinceCode: provCode,
-      });
+      let learnedRate = null;
 
-      shipQuote = getFallbackShippingQuote({
-        zip,
-        originZip,
-        provinceCode: provCode,
-      });
+      try {
+        learnedRate = await getLearnedRate({
+          deliveredType: "D",
+          provinceCode: provCode,
+          packageKey,
+        });
+      } catch (err) {
+        console.error("[checkout] error en getLearnedRate", {
+          message: err?.message,
+          stack: err?.stack,
+        });
+      }
+
+      if (learnedRate) {
+        console.log("[checkout] usando tarifa aprendida", {
+          provinceCode: provCode,
+          packageKey,
+          zip,
+        });
+        shipQuote = {
+          provider: "learned",
+          service: learnedRate.service || "Tarifa estimada",
+          eta: learnedRate.eta || "",
+          price: safeNum(learnedRate.price),
+          deliveredType: learnedRate.deliveredType || "D",
+          validTo: null,
+        };
+      } else {
+        console.warn("[checkout] fallback puro", {
+          zip,
+          provinceCode: provCode,
+          packageKey,
+        });
+
+        shipQuote = getFallbackShippingQuote({
+          zip,
+          originZip,
+          provinceCode: provCode,
+        });
+      }
     }
   }
 

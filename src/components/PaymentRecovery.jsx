@@ -22,7 +22,7 @@ export default function PaymentRecovery() {
           cart.clear();
           cart.close?.();
 
-          console.log("✅ Order already paid. Cart cleared.");
+          //console.log("✅ Order already paid. Cart cleared.");
         }
       } catch (e) {
         console.warn("payment recovery failed", e);
