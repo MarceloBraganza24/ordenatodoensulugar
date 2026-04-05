@@ -70,22 +70,48 @@ const isValidPhoneSoft = (phone) => {
 
 const isValidZip = (v) => normalizeZip(v).length >= 4;
 
-function getFlatShippingQuote({ provinceCode }) {
+function getFlatShippingQuote({ postalCode, provinceCode }) {
+  const zip = normalizeZip(postalCode);
+  const prefix = zip.charAt(0);
   const p = String(provinceCode || "").toUpperCase().trim();
 
-  if (p === "B" || p === "C") {
+  if (ORIGIN_ZIP && zip && zip === ORIGIN_ZIP && p === "B") {
     return {
-      carrier: "Envío estándar",
-      service: "A domicilio",
-      price: 6900,
-      eta: "3 a 7 días hábiles",
+      carrier: "Envío gratis",
+      service: "Zona local",
+      price: 0,
+      eta: "Coordinar entrega",
       deliveredType: "D",
       mode: "flat",
     };
   }
 
-  const patagonia = ["R", "Q", "U", "Z", "V"];
-  if (patagonia.includes(p)) {
+  // AMBA / cercanos
+  if (["1", "2", "3"].includes(prefix)) {
+    return {
+      carrier: "Envío estándar",
+      service: "A domicilio",
+      price: 6900,
+      eta: "2 a 5 días hábiles",
+      deliveredType: "D",
+      mode: "flat",
+    };
+  }
+
+  // Interior / centro / sur bonaerense
+  if (["4", "5", "6", "7", "8"].includes(prefix)) {
+    return {
+      carrier: "Envío estándar",
+      service: "A domicilio",
+      price: 7900,
+      eta: "2 a 6 días hábiles",
+      deliveredType: "D",
+      mode: "flat",
+    };
+  }
+
+  // Patagonia más lejana
+  if (["9"].includes(prefix) || ["R", "Q", "U", "Z", "V"].includes(p)) {
     return {
       carrier: "Envío estándar",
       service: "A domicilio",
@@ -128,11 +154,8 @@ function getEstimatedShippingForStep1({ provinceCode }) {
   const p = String(provinceCode || "").toUpperCase().trim();
 
   if (p === "B" || p === "C") return 6900;
-
-  const patagonia = ["R", "Q", "U", "Z", "V"];
-  if (patagonia.includes(p)) return 11900;
-
-  if (p) return 8900;
+  if (["R", "Q", "U", "Z", "V"].includes(p)) return 11900;
+  if (p) return 7900;
 
   return 6900;
 }
@@ -140,8 +163,7 @@ function getEstimatedShippingForStep1({ provinceCode }) {
 function getShortAddress({ streetName, streetNumber }) {
   return [streetName, streetNumber].filter(Boolean).join(" ");
 }
-
-function normalizeQuoteFromApi(data, fallbackProvinceCode) {
+function normalizeQuoteFromApi(data, fallbackProvinceCode, fallbackPostalCode) {
   if (!data || typeof data !== "object") return null;
 
   const q = data.quote;
@@ -176,7 +198,14 @@ function normalizeQuoteFromApi(data, fallbackProvinceCode) {
   }
 
   if (fallbackProvinceCode) {
-    return getFlatShippingQuote({ provinceCode: fallbackProvinceCode });
+    return getFlatShippingQuote({
+      postalCode:
+        fallbackPostalCode ||
+        data?.postalCodeDestinationUsed ||
+        data?.quote?.postalCodeDestination ||
+        "",
+      provinceCode: fallbackProvinceCode,
+    });
   }
 
   return null;
@@ -311,7 +340,9 @@ export function CartDrawer() {
           ? "Incluido en este pack"
           : `Gratis desde ${formatARS(FREE_SHIPPING_THRESHOLD)}`,
         price: 0,
-        eta: qualifiesByLocalZip ? "Coordinar entrega" : "",
+        eta: qualifiesByLocalZip
+          ? "Coordinar entrega"
+          : shipQuote?.eta || "",
         deliveredType: "D",
         mode: "free",
       };
@@ -586,7 +617,9 @@ export function CartDrawer() {
           ? "Incluido en este pack"
           : `Gratis desde ${formatARS(FREE_SHIPPING_THRESHOLD)}`,
         price: 0,
-        eta: qualifiesByLocalZip ? "Coordinar entrega" : "",
+        eta: qualifiesByLocalZip
+          ? "Coordinar entrega"
+          : shipQuote?.eta || "",
         deliveredType: "D",
         mode: "free",
       };
@@ -807,7 +840,11 @@ export function CartDrawer() {
       });
 
       const data = await res.json().catch(() => ({}));
-      const normalized = normalizeQuoteFromApi(data, currentProvince);
+      const normalized = normalizeQuoteFromApi(
+        data,
+        currentProvince,
+        currentPostalCode
+      );
 
       if (!res.ok || !normalized) {
         throw new Error(data?.error || "No se pudo cotizar.");
@@ -827,7 +864,17 @@ export function CartDrawer() {
         })
       );
     } catch (e) {
-      const q = getFlatShippingQuote({ provinceCode: currentProvince });
+      console.warn("[cart] quoteShipping fallback local", {
+        message: e?.message,
+        province: currentProvince,
+        postalCode: currentPostalCode,
+      });
+
+      const q = getFlatShippingQuote({
+        postalCode: currentPostalCode,
+        provinceCode: currentProvince,
+      });
+
       setShipQuote(q);
       setShipStatus("ok");
       setShipError("");
@@ -1203,7 +1250,7 @@ export function CartDrawer() {
                   <div className="cartContainer__divider" />
 
                   <div className="shippingSimple" aria-live="polite">
-                    {shouldApplyFreeShipping ? (
+                    {/* {shouldApplyFreeShipping ? (
                       <p className="shippingSimple__ok">
                         🚚 ¡Tu pedido tiene envío GRATIS!
                       </p>
@@ -1211,7 +1258,14 @@ export function CartDrawer() {
                       <p className="shippingSimple__info">
                         🚚 Envío desde: <strong>{formatARS(shippingPrice)}</strong>
                       </p>
-                    )}
+                    )} */}
+                    {!shouldApplyFreeShipping ? (
+                      <div className="shippingSimple" aria-live="polite">
+                        <p className="shippingSimple__info">
+                          🚚 Envío desde: <strong>{formatARS(shippingPrice)}</strong>
+                        </p>
+                      </div>
+                    ) : null}
                   </div>
 
                   <div className="freeShippingProgress" aria-live="polite">
@@ -1367,7 +1421,7 @@ export function CartDrawer() {
                       </div>
                     </div>
 
-                    <div className="shipQuote">
+                    {/* <div className="shipQuote">
                       <div className="shipQuote__row">
                         <div className="shipQuote__field">
                           <label>Destino</label>
@@ -1394,6 +1448,76 @@ export function CartDrawer() {
                       ) : null}
 
                       {(shouldApplyFreeShipping || (shipStatus === "ok" && resolvedShipQuote)) ? (
+                        <div className="shipQuote__result" role="status" aria-live="polite">
+                          <div className="shipQuote__resultTop">
+                            <strong>
+                              {shouldApplyFreeShipping ? "Envío gratis" : "Envío estándar"}
+                            </strong>
+
+                            {shouldApplyFreeShipping
+                              ? qualifiesByLocalZip
+                                ? " · Retiro / entrega local"
+                                : " · Envío incluido"
+                              : resolvedShipQuote?.service
+                              ? ` · ${resolvedShipQuote.service.replace(/\s*\(tarifa fija\)/i, "")}`
+                              : " · A domicilio"}
+                          </div>
+
+                          <div className="shipQuote__resultBottom">
+                            <div
+                              className={`shipQuote__price ${
+                                shouldApplyFreeShipping ? "shipQuote__price--free" : ""
+                              }`}
+                            >
+                              {shouldApplyFreeShipping
+                                ? "Gratis"
+                                : formatARS(resolvedShipQuote?.price || 0)}
+                            </div>
+
+                            {!shouldApplyFreeShipping && resolvedShipQuote?.eta ? (
+                              <div className="shipQuote__eta">{resolvedShipQuote.eta}</div>
+                            ) : null}
+                          </div>
+                        </div>
+                      ) : null}
+                    </div> */}
+                    <div className="shipQuote">
+                      <div className="shipQuote__row">
+                        <div className="shipQuote__field">
+                          <label>Destino</label>
+
+                          <div className="shipQuote__readonly">
+                            {provinceName || "—"} · {city || "—"} ·{" "}
+                            {postalCode ? normalizeZip(postalCode) : "—"}
+                          </div>
+
+                          <small className="shipQuote__hint">
+                            {shouldApplyFreeShipping
+                              ? "🚚 Tu envío es gratis para esta dirección."
+                              : shipStatus === "loading"
+                              ? "Calculando envío..."
+                              : shipStatus === "ok" && resolvedShipQuote
+                              ? "Ya calculamos tu envío con la dirección seleccionada."
+                              : "Seleccioná una dirección para calcular el envío automáticamente."}
+                          </small>
+                        </div>
+                      </div>
+
+                      {/* ERROR */}
+                      {shipStatus === "error" && shipError ? (
+                        <p className="shipQuote__error">{shipError}</p>
+                      ) : null}
+
+                      {/* LOADING (SPINNER) */}
+                      {shipStatus === "loading" ? (
+                        <div className="shipQuote__loading">
+                          <div className="spinner" />
+                          <span>Calculando envío...</span>
+                        </div>
+                      ) : null}
+
+                      {/* RESULTADO */}
+                      {(shouldApplyFreeShipping || (shipStatus === "ok" && resolvedShipQuote)) && shipStatus !== "loading" ? (
                         <div className="shipQuote__result" role="status" aria-live="polite">
                           <div className="shipQuote__resultTop">
                             <strong>
